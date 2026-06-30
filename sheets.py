@@ -681,3 +681,51 @@ def _write_monthly(name, dt, hours_decimal):
     if row_num:
         col = _col(day)
         _write(sheet, f"{col}{row_num}", [[hours_decimal]])
+
+
+def update_dashboard(dt):
+    """Заполняет код-зависимые блоки листа «Дашборд»: месячная сводка по
+    сотрудникам (блок с A54) и реестр уведомлений за сегодня (блок с A81).
+    Живые блоки (кто на работе, GPS-аномалии) — формулы, сами не трогаем."""
+    try:
+        emp_rows = _read("Сотрудники", "A2:E200")
+        employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
+
+        sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+        days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+        month_rows = _read(sheet, "A2:AH100")
+        name_to_row = {r[0].strip(): r for r in month_rows if r}
+
+        journal_rows = _read("Журнал", "A2:I3000")
+        month_prefix = f".{dt.month:02d}.{dt.year}"
+
+        workdays_so_far = sum(
+            1 for d in range(1, dt.day + 1)
+            if date(dt.year, dt.month, d).weekday() < 5
+        )
+
+        summary_rows = []
+        for name in employees:
+            row = name_to_row.get(name, [])
+            day_cells = row[1:1 + days_in_month] if len(row) > 1 else []
+            total = row[1 + days_in_month] if len(row) > 1 + days_in_month else ""
+            days_present = sum(1 for c in day_cells if str(c).strip())
+            auto_closed = sum(
+                1 for r in journal_rows
+                if len(r) >= 8 and r[1].strip() == name and r[0].endswith(month_prefix) and r[7] == "⚠️ авто"
+            )
+            pct = round(days_present / workdays_so_far * 100) if workdays_so_far else 0
+            summary_rows.append([name, total, days_present, auto_closed, f"{pct}%"])
+
+        if summary_rows:
+            _write("Дашборд", "A55", summary_rows)
+
+        # Реестр уведомлений за сегодня
+        notifs = get_today_notifications(dt)
+        notif_rows = [
+            [(n[i] if len(n) > i else "") for i in (1, 2, 3, 4, 5)]
+            for n in notifs[-30:]
+        ] if notifs else [["—", "—", "—", "—", "сегодня уведомлений ещё не было"]]
+        _write("Дашборд", "A82", notif_rows)
+    except Exception as ex:
+        log.warning(f"update_dashboard: сбой обновления дашборда: {ex}")
