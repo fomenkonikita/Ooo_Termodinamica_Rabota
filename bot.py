@@ -423,6 +423,7 @@ def btn_shift_end(message):
         reply_markup=main_kb(emp["type"], is_admin=(message.from_user.id in ADMIN_IDS)))
     run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
     run_background(sheets.update_employee_location, message.from_user.id, "")
+    run_background(sheets.update_dashboard, dt)
 
 
 @bot.message_handler(func=lambda m: m.text == "📍 Отправить точку")
@@ -487,6 +488,7 @@ def handle_location(message):
             still_loc = entry.get("location", "") if entry else ""
             sheets.update_employee_location(uid, still_loc)
             check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
+            sheets.update_dashboard(dt)
         run_background(_followup)
         return
 
@@ -513,6 +515,7 @@ def handle_location(message):
         run_background(sheets.update_monthly_on_arrival, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, loc_name)
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
+        run_background(sheets.update_dashboard, dt)
 
     elif step == "geo_departure":
         loc = sheets.get_location(loc_name)
@@ -538,6 +541,7 @@ def handle_location(message):
         run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
         run_background(sheets.update_employee_location, uid, "")
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
+        run_background(sheets.update_dashboard, dt)
 
     else:
         bot.send_message(message.chat.id,
@@ -680,6 +684,9 @@ def job_close_21():
         except Exception as ex:
             log.warning(f"21:00 close error for {e.get('name', '?')}: {ex}")
 
+    if entries:
+        run_background(sheets.update_dashboard, current)
+
 
 def job_remind_2350():
     """23:50 — напомнить тем кто продлил смену поставить отметку самому."""
@@ -732,6 +739,9 @@ def job_hard_close():
         except Exception as ex:
             log.warning(f"Hard close error for {e.get('name', '?')}: {ex}")
 
+    if entries:
+        run_background(sheets.update_dashboard, current)
+
 
 def job_reconcile():
     """00:10 — сверка вчерашнего дня: Журнал vs лист месяца, автодозаполнение пропусков."""
@@ -752,6 +762,7 @@ def job_reconcile():
                 bot.send_message(admin_id, text)
             except Exception as ex:
                 log.warning(f"Reconcile alert failed: {ex}")
+        run_background(sheets.update_dashboard, now())
 
 
 def run_health_server():
