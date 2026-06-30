@@ -128,10 +128,17 @@ def locations_kb(locations):
 def type_kb():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
+        types.InlineKeyboardButton("🏗 На объекте", callback_data="type:объект"),
+    )
+    kb.add(
         types.InlineKeyboardButton("🚗 Водитель", callback_data="type:водитель"),
-        types.InlineKeyboardButton("🔧 Сервис",   callback_data="type:объект"),
+        types.InlineKeyboardButton("🔧 Сервис",   callback_data="type:сервис"),
     )
     return kb
+
+
+def type_label(emp_type):
+    return {"объект": "На объекте", "водитель": "Водитель", "сервис": "Сервис"}.get(emp_type, emp_type)
 
 
 def still_working_kb(row_num):
@@ -290,10 +297,9 @@ def reg_type(call):
     sheets.register_employee(str(uid), name, emp_type)
     _state.pop(uid, None)
 
-    type_label = "Водитель" if emp_type == "водитель" else "Сервис"
     safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
-        f"✅ Зарегистрированы как <b>{name}</b> ({type_label})!\n\nВыберите действие:",
+        f"✅ Зарегистрированы как <b>{name}</b> ({type_label(emp_type)})!\n\nВыберите действие:",
         reply_markup=main_kb(emp_type, is_admin=(uid in ADMIN_IDS)))
     safe_answer_callback(call.id)
 
@@ -400,7 +406,7 @@ def btn_left(message):
 @bot.message_handler(func=lambda m: m.text == "🚗 Начал смену")
 def btn_shift_start(message):
     emp = sheets.get_employee(str(message.from_user.id))
-    if not emp or emp["type"] != "водитель":
+    if not emp or emp["type"] == "объект":
         return
     if sheets.find_open_entry(emp["name"]):
         bot.send_message(message.chat.id, "⚠️ Смена уже начата!")
@@ -411,7 +417,7 @@ def btn_shift_start(message):
 @bot.message_handler(func=lambda m: m.text == "🏁 Закончил смену")
 def btn_shift_end(message):
     emp = sheets.get_employee(str(message.from_user.id))
-    if not emp or emp["type"] != "водитель":
+    if not emp or emp["type"] == "объект":
         return
     open_entry = sheets.find_open_entry(emp["name"])
     if not open_entry:
@@ -430,7 +436,7 @@ def btn_shift_end(message):
 @bot.message_handler(func=lambda m: m.text == "📍 Отправить точку")
 def btn_waypoint(message):
     emp = sheets.get_employee(str(message.from_user.id))
-    if not emp or emp["type"] != "водитель":
+    if not emp or emp["type"] == "объект":
         return
     _state[message.from_user.id] = {"step": "geo_waypoint", "data": {}}
     bot.send_message(message.chat.id, "📍 Поделитесь геолокацией:", reply_markup=location_kb())
