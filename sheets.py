@@ -1,4 +1,6 @@
 import os
+import ssl
+import time
 import calendar
 import logging
 from datetime import datetime, timedelta, date
@@ -8,6 +10,28 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 log = logging.getLogger(__name__)
+
+_RETRIABLE = (ssl.SSLError, ConnectionError, TimeoutError, OSError)
+
+
+def _execute(request, max_retries=3):
+    """Выполняет запрос к Google API с повтором при транзитных сетевых сбоях
+    (SSL-ошибки вида decryption failed/wrong version number, обрывы
+    соединения — реальная причина повторявшихся «новый сотрудник не попал
+    в табель» багов 30.06.2026: единичный сбой сети тихо терял запись,
+    а наружный try/except это просто проглатывал). Любой вызов .execute()
+    в этом файле должен идти через эту функцию."""
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return request.execute()
+        except _RETRIABLE as ex:
+            last_exc = ex
+            if attempt < max_retries - 1:
+                wait = 0.5 * (attempt + 1)
+                log.warning(f"Google API сетевой сбой (попытка {attempt+1}/{max_retries}), retry через {wait}с: {ex}")
+                time.sleep(wait)
+    raise last_exc
 
 CLIENT_ID      = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET  = os.environ["GOOGLE_CLIENT_SECRET"]
@@ -30,7 +54,15 @@ def _svc():
             client_secret=CLIENT_SECRET,
             scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
-        creds.refresh(Request())
+        for attempt in range(3):
+            try:
+                creds.refresh(Request())
+                break
+            except _RETRIABLE as ex:
+                if attempt == 2:
+                    raise
+                log.warning(f"Сбой обновления токена Google (попытка {attempt+1}/3): {ex}")
+                time.sleep(0.5 * (attempt + 1))
         _service = build("sheets", "v4", credentials=creds)
     return _service
 
@@ -44,30 +76,30 @@ def _col(n):
     return result
 
 def _read(sheet, range_):
-    res = _svc().spreadsheets().values().get(
+    res = _execute(_svc().spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!{range_}"
-    ).execute()
+    ))
     return res.get("values", [])
 
 def _append(sheet, values):
-    _svc().spreadsheets().values().append(
+    _execute(_svc().spreadsheets().values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A1",
         valueInputOption="USER_ENTERED",
         body={"values": [values]}
-    ).execute()
+    ))
 
 def _write(sheet, range_, values):
-    _svc().spreadsheets().values().update(
+    _execute(_svc().spreadsheets().values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!{range_}",
         valueInputOption="USER_ENTERED",
         body={"values": values}
-    ).execute()
+    ))
 
 def _get_sheet_id(title):
-    meta = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    meta = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     for s in meta["sheets"]:
         if s["properties"]["title"] == title:
             return s["properties"]["sheetId"]
@@ -77,7 +109,7 @@ def _set_cell_color(sheet_title, row_num, col_index, r, g, b):
     sheet_id = _get_sheet_id(sheet_title)
     if sheet_id is None:
         return
-    _svc().spreadsheets().batchUpdate(
+    _execute(_svc().spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{
             "repeatCell": {
@@ -94,7 +126,7 @@ def _set_cell_color(sheet_title, row_num, col_index, r, g, b):
                 "fields": "userEnteredFormat.backgroundColor",
             }
         }]}
-    ).execute()
+    ))
 
 
 # ── Публичный API ──────────────────────────────────────────────────────────────
@@ -216,14 +248,14 @@ def find_open_entry(name):
     return None
 
 def _ensure_notifications_sheet():
-    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"] for s in meta["sheets"]}
     if "Уведомления" in existing:
         return
-    _svc().spreadsheets().batchUpdate(
+    _execute(_svc().spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": "Уведомления"}}}]}
-    ).execute()
+    ))
     _write("Уведомления", "A1", [["Дата", "Время", "Сотрудник", "Тип", "Запланировано", "Статус", "Текст"]])
 
 
@@ -464,14 +496,14 @@ def _clear_monthly_auto(name, dt):
     _set_cell_color(sheet, row_num, day, 1.0, 1.0, 1.0)  # белый
 
 def _ensure_gps_log_sheet():
-    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"] for s in meta["sheets"]}
     if "GPS лог" in existing:
         return
-    _svc().spreadsheets().batchUpdate(
+    _execute(_svc().spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": "GPS лог"}}}]}
-    ).execute()
+    ))
     _write("GPS лог", "A1", [["Дата", "Время", "TG ID", "Имя", "Объект", "Lat", "Lon", "Accuracy", "Подозрение"]])
 
 
@@ -614,16 +646,16 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     """Создаёт месячный лист с заголовком и серыми выходными если его нет."""
     if sheet_name in _known_sheets:
         return
-    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
     _known_sheets.update(existing.keys())
     if sheet_name in existing:
         return
 
-    _svc().spreadsheets().batchUpdate(
+    _execute(_svc().spreadsheets().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]}
-    ).execute()
+    ))
     _known_sheets.add(sheet_name)
 
     days_in_month = calendar.monthrange(year, month)[1]
@@ -631,7 +663,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     _write(sheet_name, "A1", [header])
 
     # Красим субботы и воскресенья серым
-    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     sheet_id = next(s["properties"]["sheetId"] for s in meta["sheets"]
                     if s["properties"]["title"] == sheet_name)
     requests = []
@@ -653,10 +685,10 @@ def _ensure_monthly_sheet(sheet_name, year, month):
                 }
             })
     if requests:
-        _svc().spreadsheets().batchUpdate(
+        _execute(_svc().spreadsheets().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": requests}
-        ).execute()
+        ))
 
 def reconcile_day(dt):
     """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
