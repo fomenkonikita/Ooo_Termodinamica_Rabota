@@ -128,8 +128,8 @@ def locations_kb(locations):
 def type_kb():
     kb = types.InlineKeyboardMarkup(row_width=2)
     kb.add(
-        types.InlineKeyboardButton("🏗 На объекте", callback_data="type:объект"),
-        types.InlineKeyboardButton("🚗 Водитель",   callback_data="type:водитель"),
+        types.InlineKeyboardButton("🚗 Водитель", callback_data="type:водитель"),
+        types.InlineKeyboardButton("🔧 Сервис",   callback_data="type:объект"),
     )
     return kb
 
@@ -290,9 +290,10 @@ def reg_type(call):
     sheets.register_employee(str(uid), name, emp_type)
     _state.pop(uid, None)
 
+    type_label = "Водитель" if emp_type == "водитель" else "Сервис"
     safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
-        f"✅ Зарегистрированы как <b>{name}</b> ({emp_type})!\n\nВыберите действие:",
+        f"✅ Зарегистрированы как <b>{name}</b> ({type_label})!\n\nВыберите действие:",
         reply_markup=main_kb(emp_type, is_admin=(uid in ADMIN_IDS)))
     safe_answer_callback(call.id)
 
