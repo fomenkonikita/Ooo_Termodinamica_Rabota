@@ -620,8 +620,24 @@ def auto_close_entry(row_num, name, arrival_str, close_dt):
     _mark_monthly_auto(name, close_dt, hours_decimal)
 
 def _mark_monthly_auto(name, dt, hours_decimal):
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    day   = dt.day
+    """См. _write_monthly — та же логика: пишем СУММУ всех закрытых смен
+    этого дня, не только последнюю (авто-закрытую)."""
+    sheet    = f"{MONTHS_RU[dt.month]} {dt.year}"
+    day      = dt.day
+    date_str = dt.strftime("%d.%m.%Y")
+
+    day_total_decimal = hours_decimal
+    try:
+        journal_rows = _read("Журнал", "A2:I3000")
+        total_min = 0
+        for r in journal_rows:
+            if len(r) >= 7 and r[0].strip() == date_str and r[1].strip() == name and r[6].strip():
+                h, m = r[6].strip().split(":")
+                total_min += int(h) * 60 + int(m)
+        if total_min > 0:
+            day_total_decimal = round(total_min / 60, 2)
+    except Exception as ex:
+        log.warning(f"_mark_monthly_auto: не удалось пересчитать сумму за день для {name}: {ex}")
 
     _ensure_monthly_sheet(sheet, dt.year, dt.month)
     rows = _read(sheet, "A2:A100")
@@ -641,7 +657,7 @@ def _mark_monthly_auto(name, dt, hours_decimal):
         return
 
     col = _col(day)
-    _write(sheet, f"{col}{row_num}", [[hours_decimal]])
+    _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
     _set_cell_color(sheet, row_num, day, 1.0, 0.4, 0.4)  # красный
 
 _known_sheets = set()  # кэш существующих листов — не дёргать метаданные на каждый чих
@@ -694,6 +710,41 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             body={"requests": requests}
         ))
 
+def verify_journal_integrity():
+    """Сверяет КАЖДУЮ закрытую запись Журнала: совпадает ли «Отработано» (G)
+    с реальной разницей уход-приход. Чинит расхождения сама и возвращает
+    список исправленного — неважно, откуда взялась ошибка (баг, ручная
+    правка), эта проверка ловит её саму по себе (см. инцидент 30.06.2026 —
+    запись с 0:00 вместо 2:00, причину которой не удалось установить
+    из-за пересозданной git-истории)."""
+    fixed = []
+    try:
+        rows = _read("Журнал", "A2:J3000")
+        for i, row in enumerate(rows):
+            if len(row) < 7 or not row[4].strip() or not row[5].strip():
+                continue
+            arrival_str, departure_str, stored = row[4].strip(), row[5].strip(), row[6].strip()
+            try:
+                arr = datetime.strptime(arrival_str, "%H:%M")
+                dep = datetime.strptime(departure_str, "%H:%M")
+                if dep < arr:
+                    dep += timedelta(days=1)
+                total_min = int((dep - arr).total_seconds() // 60)
+                real_str  = f"{total_min // 60}:{total_min % 60:02d}"
+            except Exception:
+                continue
+            if stored != real_str:
+                row_num = i + 2
+                _write("Журнал", f"G{row_num}", [[real_str]])
+                fixed.append({
+                    "name": row[1].strip(), "date": row[0].strip(),
+                    "was": stored, "now": real_str,
+                })
+    except Exception as ex:
+        log.warning(f"verify_journal_integrity: сбой: {ex}")
+    return fixed
+
+
 def reconcile_day(dt):
     """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
     Возвращает список исправленных записей [{name, date, hours}]."""
@@ -742,8 +793,28 @@ def reconcile_day(dt):
 
 
 def _write_monthly(name, dt, hours_decimal):
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    day   = dt.day
+    """Пишет ИТОГ часов за день — не просто последнюю смену, а сумму ВСЕХ
+    закрытых смен этого сотрудника в этот день из Журнала. Раньше писалась
+    только последняя смена, перезаписывая предыдущие — если за день было
+    несколько заходов/выходов (обед, повторный приход), реальные часы
+    занижались (см. инцидент 30.06.2026: 3 смены за день, в табеле
+    оставалась только вторая, 0:15, вместо суммы ~3,75ч)."""
+    sheet     = f"{MONTHS_RU[dt.month]} {dt.year}"
+    day       = dt.day
+    date_str  = dt.strftime("%d.%m.%Y")
+
+    day_total_decimal = hours_decimal
+    try:
+        journal_rows = _read("Журнал", "A2:I3000")
+        total_min = 0
+        for r in journal_rows:
+            if len(r) >= 7 and r[0].strip() == date_str and r[1].strip() == name and r[6].strip():
+                h, m = r[6].strip().split(":")
+                total_min += int(h) * 60 + int(m)
+        if total_min > 0:
+            day_total_decimal = round(total_min / 60, 2)
+    except Exception as ex:
+        log.warning(f"_write_monthly: не удалось пересчитать сумму за день для {name}, пишу только последнюю смену: {ex}")
 
     _ensure_monthly_sheet(sheet, dt.year, dt.month)
     rows = _read(sheet, "A2:A100")
@@ -764,7 +835,7 @@ def _write_monthly(name, dt, hours_decimal):
 
     if row_num:
         col = _col(day)
-        _write(sheet, f"{col}{row_num}", [[hours_decimal]])
+        _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
 
 
 _dashboard_lock = threading.Lock()
