@@ -335,10 +335,15 @@ def get_today_notification_plan(dt):
 
     for p in plan:
         key = (p["name"], p["type"])
+        minutes_late = (dt - p["planned_at"]).total_seconds() / 60
         if key in sent_map:
             p["actual_time"], p["status"] = sent_map[key]
         elif p["planned_at"] > dt:
             p["actual_time"], p["status"] = None, "запланировано"
+        elif minutes_late <= 120:
+            # В пределах догоняющего окна job_schedule_check (см. bot.py) —
+            # ещё не «пропущено», просто ждём ближайший запуск джобы (≤5 мин)
+            p["actual_time"], p["status"] = None, "ожидает отправки"
         else:
             p["actual_time"], p["status"] = None, "ПРОПУЩЕНО"
 

@@ -583,17 +583,26 @@ def job_schedule_check():
         minutes_to_start = (sched_dt - current).total_seconds() / 60
         minutes_after_start = -minutes_to_start
 
-        # За 10 мин до начала — напомнить отметиться
+        # За 10 мин до начала — напомнить отметиться. Окно расширено до 2ч
+        # «вдогонку»: если бот был недоступен в плановое время (см. инцидент
+        # 30.06.2026 — пять пропущенных подряд из-за нестабильности сети),
+        # следующий же запуск джобы досылает напоминание с пометкой, а не
+        # просто молча помечает «пропущено» навсегда.
         before_key = f"{name}_{today}_bs"
-        if 5 <= minutes_to_start < 10 and before_key not in _schedule_notified:
-            _schedule_notified.add(before_key)
-            text = "⏰ Через 10 минут начало рабочего дня!\nНе забудь поставить отметку «Пришёл»."
-            try:
-                bot.send_message(int(tg_id), text)
-                sheets.log_notification(name, "до начала смены", emp["schedule"], "отправлено", text, current)
-            except Exception as ex:
-                log.warning(f"Before-start remind failed {tg_id}: {ex}")
-                sheets.log_notification(name, "до начала смены", emp["schedule"], f"ошибка: {ex}", text, current)
+        if -120 <= minutes_to_start < 10 and before_key not in _schedule_notified:
+            if not sheets.find_open_entry(name):
+                _schedule_notified.add(before_key)
+                late = minutes_to_start < 5
+                text = "⏰ Через 10 минут начало рабочего дня!\nНе забудь поставить отметку «Пришёл»."
+                if late:
+                    text = "⏰ Не забудь поставить отметку «Пришёл» (напоминание задержалось из-за технического сбоя)."
+                try:
+                    bot.send_message(int(tg_id), text)
+                    sheets.log_notification(name, "до начала смены", emp["schedule"],
+                        "отправлено" if not late else "отправлено с опозданием", text, current)
+                except Exception as ex:
+                    log.warning(f"Before-start remind failed {tg_id}: {ex}")
+                    sheets.log_notification(name, "до начала смены", emp["schedule"], f"ошибка: {ex}", text, current)
 
         # Через 10 мин после начала — собираем сводку (пришёл/не пришёл)
         after_key = f"{name}_{today}_as"
@@ -615,13 +624,19 @@ def job_schedule_check():
             if end_dt:
                 minutes_to_end = (end_dt - current).total_seconds() / 60
                 end_before_key = f"{name}_{today}_be"
-                if 25 <= minutes_to_end < 30 and end_before_key not in _schedule_notified:
+                # Окно расширено до 2ч «вдогонку» — та же логика, что и для
+                # напоминания о начале (см. комментарий выше).
+                if -120 <= minutes_to_end < 30 and end_before_key not in _schedule_notified:
                     if sheets.find_open_entry(name):
                         _schedule_notified.add(end_before_key)
+                        late = minutes_to_end < 25
                         text = "🏁 Не забудь поставить отметку «Ушёл»."
+                        if late:
+                            text = "🏁 Не забудь поставить отметку «Ушёл» (напоминание задержалось из-за технического сбоя)."
                         try:
                             bot.send_message(int(tg_id), text)
-                            sheets.log_notification(name, "до конца смены", end_time_str, "отправлено", text, current)
+                            sheets.log_notification(name, "до конца смены", end_time_str,
+                                "отправлено" if not late else "отправлено с опозданием", text, current)
                         except Exception as ex:
                             log.warning(f"Before-end remind failed {tg_id}: {ex}")
                             sheets.log_notification(name, "до конца смены", end_time_str, f"ошибка: {ex}", text, current)
