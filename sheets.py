@@ -215,6 +215,52 @@ def find_open_entry(name):
                 }
     return None
 
+def _ensure_notifications_sheet():
+    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    existing = {s["properties"]["title"] for s in meta["sheets"]}
+    if "Уведомления" in existing:
+        return
+    _svc().spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": "Уведомления"}}}]}
+    ).execute()
+    _write("Уведомления", "A1", [["Дата", "Время", "Сотрудник", "Тип", "Запланировано", "Статус", "Текст"]])
+
+
+def log_notification(name, type_, planned_at, status, text, dt):
+    """Лог-реестр напоминаний: что должно было уйти и что реально ушло.
+    Не должен ломать основной поток при сбое — только лучшее старание."""
+    try:
+        _ensure_notifications_sheet()
+        _append("Уведомления", [
+            dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M"), name, type_, planned_at, status, text,
+        ])
+    except Exception as ex:
+        log.warning(f"log_notification: не удалось залогировать для {name}: {ex}")
+
+
+def get_today_notifications(dt):
+    """Реестр уведомлений за сегодня — для админ-кнопки."""
+    try:
+        rows = _read("Уведомления", "A2:G3000")
+    except Exception:
+        return []
+    today = dt.strftime("%d.%m.%Y")
+    return [r for r in rows if r and r[0] == today]
+
+
+def has_closed_entry_today(name, dt):
+    """Есть ли у сотрудника уже ЗАВЕРШЁННАЯ (приход+уход) запись сегодня —
+    признак того, что повторный приход может быть случайным/тестовым (см.
+    инцидент с риском «фантомных» часов при двойной отметке за день)."""
+    date_str = dt.strftime("%d.%m.%Y")
+    rows = _read("Журнал", "A2:I2000")
+    for row in rows:
+        if len(row) >= 6 and row[0] == date_str and row[1].strip() == name and str(row[5]).strip():
+            return True
+    return False
+
+
 def get_entry_by_row(row_num):
     """Читает конкретную строку Журнала."""
     rows = _read("Журнал", f"A{row_num}:I{row_num}")
@@ -230,6 +276,10 @@ def get_entry_by_row(row_num):
     return None
 
 def record_arrival(name, emp_type, location, dt):
+    """Только критичная запись в Журнал (источник правды) — быстро, 1 запрос к API.
+    Месячный лист обновляется отдельно через update_monthly_on_arrival, обычно
+    в фоновом потоке, чтобы не задерживать ответ пользователю (см. инцидент
+    30.06.2026 — бот «висел» на отметке из-за 8-10 последовательных запросов)."""
     _append("Журнал", [
         dt.strftime("%d.%m.%Y"),
         name,
@@ -238,16 +288,17 @@ def record_arrival(name, emp_type, location, dt):
         dt.strftime("%H:%M"),
         "", "", "", "",
     ])
-    # Создаём строку в месячном листе сразу при приходе.
-    # Журнал — источник правды, уже записан выше: сбой здесь не должен
-    # ломать подтверждение прихода пользователю (см. инцидент 30.06.2026,
-    # когда новые сотрудники не появлялись в месячном табеле).
+
+
+def update_monthly_on_arrival(name, dt):
+    """Создаёт/подсвечивает строку в месячном листе. Можно (и нужно) вызывать
+    асинхронно после record_arrival — не блокирует ответ пользователю."""
     try:
         _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
         _ensure_employee_row(name, dt)
         _mark_monthly_present(name, dt)
     except Exception as ex:
-        log.warning(f"record_arrival: не удалось обновить месячный лист для {name}: {ex}")
+        log.warning(f"update_monthly_on_arrival: не удалось обновить месячный лист для {name}: {ex}")
 
 
 def _mark_monthly_present(name, dt):
@@ -283,16 +334,14 @@ def _ensure_employee_row(name, dt):
             return  # уже есть
     days_in_month = calendar.monthrange(dt.year, dt.month)[1]
     _append(sheet, [name] + [""] * days_in_month + [""])
-    # Пишем формулу Итого
-    rows = _read(sheet, "A2:A100")
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            row_num      = i + 2
-            last_day_col = _col(days_in_month)
-            total_col    = _col(days_in_month + 1)
-            _write(sheet, f"{total_col}{row_num}",
-                   [[f"=SUM(B{row_num}:{last_day_col}{row_num})"]])
-            return
+    # Строка добавилась сразу за последней непустой — индекс уже знаем,
+    # повторное чтение не нужно (было узким местом на новых сотрудниках)
+    row_num      = len(rows) + 2
+    last_day_col = _col(days_in_month)
+    total_col    = _col(days_in_month + 1)
+    _write(sheet, f"{total_col}{row_num}",
+           [[f"=SUM(B{row_num}:{last_day_col}{row_num})"]])
+
 
 def record_departure(name, dt, open_entry):
     arrival_str   = open_entry["arrival"]
@@ -311,12 +360,17 @@ def record_departure(name, dt, open_entry):
         hours_str, hours_decimal = "0:00", 0.0
 
     _write("Журнал", f"F{row_num}:I{row_num}", [[departure_str, hours_str, "✅", ""]])
+    return hours_str, hours_decimal
+
+
+def update_monthly_on_departure(name, dt, hours_decimal):
+    """Пишет часы и сбрасывает цвет в месячном листе. Вызывать после record_departure,
+    обычно асинхронно — не блокирует ответ пользователю."""
     try:
         _write_monthly(name, dt, hours_decimal)
         _reset_monthly_color(name, dt)
     except Exception as ex:
-        log.warning(f"record_departure: не удалось обновить месячный лист для {name}: {ex}")
-    return hours_str
+        log.warning(f"update_monthly_on_departure: не удалось обновить месячный лист для {name}: {ex}")
 
 def update_last_activity(name, time_str):
     """Обновляет время последней активности (колонка I) в открытой записи Журнала."""
@@ -373,17 +427,18 @@ def _ensure_gps_log_sheet():
     _write("GPS лог", "A1", [["Дата", "Время", "TG ID", "Имя", "Объект", "Lat", "Lon", "Accuracy", "Подозрение"]])
 
 
-def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt):
+def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt, check_accuracy=True):
     """Логирует GPS-замер при отметке и возвращает список причин подозрения на подмену
     геолокации (пустой список = замер выглядит нормально). Не блокирует отметку —
-    только сигнал для админа."""
+    только сигнал для админа. check_accuracy=False — для платформ, которые вообще не
+    отдают точность (например MAX), чтобы не алертить на каждую отметку."""
     try:
         _ensure_gps_log_sheet()
         lat_r = round(lat, 6)
         lon_r = round(lon, 6)
 
         reasons = []
-        if not accuracy or accuracy <= 0:
+        if check_accuracy and (not accuracy or accuracy <= 0):
             reasons.append("нет данных о точности GPS (horizontal_accuracy)")
 
         rows = _read("GPS лог", "A2:H5000")
@@ -505,10 +560,15 @@ def _mark_monthly_auto(name, dt, hours_decimal):
     _write(sheet, f"{col}{row_num}", [[hours_decimal]])
     _set_cell_color(sheet, row_num, day, 1.0, 0.4, 0.4)  # красный
 
+_known_sheets = set()  # кэш существующих листов — не дёргать метаданные на каждый чих
+
 def _ensure_monthly_sheet(sheet_name, year, month):
     """Создаёт месячный лист с заголовком и серыми выходными если его нет."""
+    if sheet_name in _known_sheets:
+        return
     meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
     existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
+    _known_sheets.update(existing.keys())
     if sheet_name in existing:
         return
 
@@ -516,6 +576,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]}
     ).execute()
+    _known_sheets.add(sheet_name)
 
     days_in_month = calendar.monthrange(year, month)[1]
     header = ["Имя"] + list(range(1, days_in_month + 1)) + ["Итого"]

@@ -1,5 +1,6 @@
 import os
 import logging
+import threading
 from math import radians, cos, sin, asin, sqrt
 from datetime import datetime, timedelta
 
@@ -53,6 +54,18 @@ def safe_clear_markup(chat_id, message_id):
         log.warning(f"edit_message_reply_markup failed: {ex}")
 
 
+def run_background(func, *args, **kwargs):
+    """Запускает небоевую часть (месячный лист, локация, GPS-проверка) в фоновом
+    потоке, чтобы ответ пользователю не ждал 8-10 последовательных запросов к
+    Google Sheets API (см. инцидент 30.06.2026 — отметка «висла» на новых людях)."""
+    def _runner():
+        try:
+            func(*args, **kwargs)
+        except Exception as ex:
+            log.warning(f"Фоновая задача {func.__name__} упала: {ex}")
+    threading.Thread(target=_runner, daemon=True).start()
+
+
 def now():
     return datetime.utcnow() + timedelta(hours=TZ_OFFSET)
 
@@ -95,6 +108,7 @@ def main_kb(emp_type, is_admin=False):
         kb.add("📍 Отправить точку")
     if is_admin:
         kb.add("📊 Статус")
+        kb.add("📋 Уведомления")
     return kb
 
 
@@ -167,6 +181,43 @@ def _show_status(chat_id):
         lines.append(f"  • {e['name']} — с {e['arrival']} ({duration}){loc_part}")
 
     bot.send_message(chat_id, "\n".join(lines))
+
+
+@bot.message_handler(func=lambda m: m.text == "📋 Уведомления")
+def btn_notifications(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    dt = now()
+    notifs = sheets.get_today_notifications(dt)
+
+    lines = [f"📋 <b>Уведомления за {dt.strftime('%d.%m')}</b>\n"]
+    if not notifs:
+        lines.append("Сегодня ещё ничего не отправлялось (или график пуст).")
+    else:
+        for n in notifs[-25:]:
+            time_, name, type_, planned, status = n[1], n[2], n[3], n[4], n[5]
+            icon = "✅" if status == "отправлено" else "❌"
+            lines.append(f"{icon} {time_} — {name} ({type_}, план {planned}) — {status}")
+
+    # Сводка: кто не отметился сегодня вообще
+    emps = sheets.get_all_employees_with_schedule()
+    today = dt.strftime("%d.%m.%Y")
+    not_marked = []
+    for emp in emps:
+        if not emp["schedule"]:
+            continue
+        work_days = emp.get("work_days")
+        if work_days and dt.weekday() not in work_days:
+            continue
+        if not sheets.find_open_entry(emp["name"]) and not sheets.has_closed_entry_today(emp["name"], dt):
+            not_marked.append(emp["name"])
+
+    if not_marked:
+        lines.append("\n⚠️ <b>Не отмечались сегодня вообще:</b>")
+        for name in not_marked:
+            lines.append(f"  • {name}")
+
+    bot.send_message(message.chat.id, "\n".join(lines))
 
 
 # ── /start ─────────────────────────────────────────────────────────────────────
@@ -246,13 +297,13 @@ def reg_type(call):
 
 # ── Выбор объекта ──────────────────────────────────────────────────────────────
 
-def ask_location(message, action):
+def ask_location(chat_id, uid, action):
     locs = sheets.get_all_locations()
     if not locs:
-        bot.send_message(message.chat.id, "❌ Нет объектов в таблице. Добавьте их в лист «Локации».")
+        bot.send_message(chat_id, "❌ Нет объектов в таблице. Добавьте их в лист «Локации».")
         return
-    _state[message.from_user.id] = {"step": "location_select", "data": {"action": action}}
-    bot.send_message(message.chat.id, "На каком объекте?", reply_markup=locations_kb(locs))
+    _state[uid] = {"step": "location_select", "data": {"action": action}}
+    bot.send_message(chat_id, "На каком объекте?", reply_markup=locations_kb(locs))
 
 
 @bot.callback_query_handler(func=lambda c: c.data.startswith("loc:"))
@@ -304,7 +355,28 @@ def btn_arrived(message):
     if sheets.find_open_entry(emp["name"]):
         bot.send_message(message.chat.id, "⚠️ Вы уже отметились как пришедший.\nСначала нажмите «Ушёл».")
         return
-    ask_location(message, "arrival")
+    # Уже был полный приход+уход сегодня — скорее всего случайное повторное
+    # нажатие, переспрашиваем, чтобы не насчитать фантомные часы до 21:00
+    if sheets.has_closed_entry_today(emp["name"], now()):
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("✅ Да, начинаю новую смену", callback_data="confirm_second_arrival:yes"),
+               types.InlineKeyboardButton("❌ Нет, это случайно", callback_data="confirm_second_arrival:no"))
+        bot.send_message(message.chat.id,
+            "⚠️ Вы уже отмечали сегодня приход и уход.\nТочно начинаете новую смену?",
+            reply_markup=kb)
+        return
+    ask_location(message.chat.id, message.from_user.id, "arrival")
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("confirm_second_arrival:"))
+def cb_confirm_second_arrival(call):
+    answer = call.data.split(":", 1)[1]
+    safe_clear_markup(call.message.chat.id, call.message.message_id)
+    safe_answer_callback(call.id)
+    if answer == "yes":
+        ask_location(call.message.chat.id, call.from_user.id, "arrival")
+    else:
+        bot.send_message(call.message.chat.id, "Хорошо, отметка не создана.")
 
 
 @bot.message_handler(func=lambda m: m.text == "🚪 Ушёл")
@@ -330,7 +402,7 @@ def btn_shift_start(message):
     if sheets.find_open_entry(emp["name"]):
         bot.send_message(message.chat.id, "⚠️ Смена уже начата!")
         return
-    ask_location(message, "arrival")
+    ask_location(message.chat.id, message.from_user.id, "arrival")
 
 
 @bot.message_handler(func=lambda m: m.text == "🏁 Закончил смену")
@@ -342,12 +414,13 @@ def btn_shift_end(message):
     if not open_entry:
         bot.send_message(message.chat.id, "⚠️ Смена не была начата!")
         return
-    dt     = now()
-    worked = sheets.record_departure(emp["name"], dt, open_entry)
-    sheets.update_employee_location(message.from_user.id, "")
+    dt = now()
+    worked, hours_decimal = sheets.record_departure(emp["name"], dt, open_entry)
     bot.send_message(message.chat.id,
         f"🏁 Смена завершена!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>",
         reply_markup=main_kb(emp["type"], is_admin=(message.from_user.id in ADMIN_IDS)))
+    run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
+    run_background(sheets.update_employee_location, message.from_user.id, "")
 
 
 @bot.message_handler(func=lambda m: m.text == "📍 Отправить точку")
@@ -400,16 +473,19 @@ def handle_location(message):
                         reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
                     return
         sheets.reopen_entry(row_num, emp["name"], dt)
-        sheets.update_last_activity(emp["name"], dt.strftime("%H:%M"))
-        entry = sheets.get_entry_by_row(row_num)
-        still_loc = entry.get("location", "") if entry else ""
-        sheets.update_employee_location(uid, still_loc)
-        check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
         bot.send_message(message.chat.id,
             f"✅ <b>Подтверждено! Вы на работе.</b>\n"
             f"🕒 {dt.strftime('%H:%M')}\n"
             f"⚠️ В 23:55 смена закроется автоматически.",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+
+        def _followup():
+            sheets.update_last_activity(emp["name"], dt.strftime("%H:%M"))
+            entry = sheets.get_entry_by_row(row_num)
+            still_loc = entry.get("location", "") if entry else ""
+            sheets.update_employee_location(uid, still_loc)
+            check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
+        run_background(_followup)
         return
 
     loc_name = data.get("location", "")
@@ -428,12 +504,13 @@ def handle_location(message):
             dist_msg = ""
 
         sheets.record_arrival(emp["name"], emp["type"], loc_name, dt)
-        sheets.update_employee_location(uid, loc_name)
-        check_gps_and_alert(uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         icon = "✅" if emp["type"] == "объект" else "🚗"
         bot.send_message(message.chat.id,
             f"{icon} Приход записан!\n📍 Объект: <b>{loc_name}</b>\n🕒 {dt.strftime('%H:%M')}{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        run_background(sheets.update_monthly_on_arrival, emp["name"], dt)
+        run_background(sheets.update_employee_location, uid, loc_name)
+        run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
 
     elif step == "geo_departure":
         loc = sheets.get_location(loc_name)
@@ -452,12 +529,13 @@ def handle_location(message):
         if not open_entry:
             bot.send_message(message.chat.id, "⚠️ Нет открытой отметки.", reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
             return
-        worked = sheets.record_departure(emp["name"], dt, open_entry)
-        sheets.update_employee_location(uid, "")
-        check_gps_and_alert(uid, emp["name"], loc_name, lat, lon, accuracy, dt)
+        worked, hours_decimal = sheets.record_departure(emp["name"], dt, open_entry)
         bot.send_message(message.chat.id,
             f"🚪 Уход записан!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
+        run_background(sheets.update_employee_location, uid, "")
+        run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
 
     else:
         bot.send_message(message.chat.id,
@@ -496,11 +574,13 @@ def job_schedule_check():
         before_key = f"{name}_{today}_bs"
         if 5 <= minutes_to_start < 10 and before_key not in _schedule_notified:
             _schedule_notified.add(before_key)
+            text = "⏰ Через 10 минут начало рабочего дня!\nНе забудь поставить отметку «Пришёл»."
             try:
-                bot.send_message(int(tg_id),
-                    f"⏰ Через 10 минут начало рабочего дня!\nНе забудь поставить отметку «Пришёл».")
+                bot.send_message(int(tg_id), text)
+                sheets.log_notification(name, "до начала смены", emp["schedule"], "отправлено", text, current)
             except Exception as ex:
                 log.warning(f"Before-start remind failed {tg_id}: {ex}")
+                sheets.log_notification(name, "до начала смены", emp["schedule"], f"ошибка: {ex}", text, current)
 
         # Через 10 мин после начала — собираем сводку (пришёл/не пришёл)
         after_key = f"{name}_{today}_as"
@@ -525,11 +605,13 @@ def job_schedule_check():
                 if 25 <= minutes_to_end < 30 and end_before_key not in _schedule_notified:
                     if sheets.find_open_entry(name):
                         _schedule_notified.add(end_before_key)
+                        text = "🏁 Через 30 минут конец рабочего дня!\nНе забудь поставить отметку «Ушёл»."
                         try:
-                            bot.send_message(int(tg_id),
-                                f"🏁 Через 30 минут конец рабочего дня!\nНе забудь поставить отметку «Ушёл».")
+                            bot.send_message(int(tg_id), text)
+                            sheets.log_notification(name, "до конца смены", end_time_str, "отправлено", text, current)
                         except Exception as ex:
                             log.warning(f"Before-end remind failed {tg_id}: {ex}")
+                            sheets.log_notification(name, "до конца смены", end_time_str, f"ошибка: {ex}", text, current)
 
     if late_list or ok_list:
         lines = [f"📋 <b>Статус на {current.strftime('%H:%M')}</b>\n"]
