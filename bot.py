@@ -618,7 +618,7 @@ def job_schedule_check():
                 if 25 <= minutes_to_end < 30 and end_before_key not in _schedule_notified:
                     if sheets.find_open_entry(name):
                         _schedule_notified.add(end_before_key)
-                        text = "🏁 Через 30 минут конец рабочего дня!\nНе забудь поставить отметку «Ушёл»."
+                        text = "🏁 Не забудь поставить отметку «Ушёл»."
                         try:
                             bot.send_message(int(tg_id), text)
                             sheets.log_notification(name, "до конца смены", end_time_str, "отправлено", text, current)
