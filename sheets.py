@@ -773,6 +773,24 @@ def verify_journal_integrity():
     return fixed
 
 
+def resync_today_totals(dt):
+    """Самопочинка: пересчитывает Итого-за-день для ВСЕХ сотрудников с
+    активностью сегодня, читая Журнал заново — и ВСЕГДА перезаписывает
+    (в отличие от reconcile_day, который только дозаполняет пустое).
+    Нужна, потому что update_monthly_on_departure уходит в фоновый поток
+    (run_background) и при сетевом сбое может тихо не выполниться — без
+    этой подстраховки месячный лист застревает на старой сумме (см.
+    инцидент 30.06.2026 — у Никиты 2 смены из 5 не попали в Итого)."""
+    try:
+        date_str = dt.strftime("%d.%m.%Y")
+        rows = _read("Журнал", "A2:I3000")
+        names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and r[0] == date_str}
+        for name in names_today:
+            _write_monthly(name, dt, 0)
+    except Exception as ex:
+        log.warning(f"resync_today_totals: сбой: {ex}")
+
+
 def reconcile_day(dt):
     """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
     Возвращает список исправленных записей [{name, date, hours}]."""

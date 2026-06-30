@@ -676,11 +676,12 @@ def job_resync_green():
 
 def job_update_dashboard():
     """Каждые 5 мин: синхронизирует переименования сотрудников по TG ID
-    (см. sync_employee_names), затем обновляет все код-зависимые блоки
-    листа «Дашборд» (кто на работе, GPS-аномалии, месячная сводка,
-    реестр уведомлений)."""
+    (см. sync_employee_names), пересчитывает Итого-за-сегодня для всех
+    (см. resync_today_totals — страховка от тихих сбоев фоновой записи
+    после ухода), затем обновляет все код-зависимые блоки листа «Дашборд»."""
     dt = now()
     sheets.sync_employee_names(dt)
+    sheets.resync_today_totals(dt)
     sheets.update_dashboard(dt)
 
 
