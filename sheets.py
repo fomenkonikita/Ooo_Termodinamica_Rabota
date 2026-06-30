@@ -928,12 +928,24 @@ def update_dashboard(dt):
         _dashboard_lock.release()
 
 
+def _clear_block(range_):
+    """Чистит весь зарезервированный диапазон блока ПЕРЕД записью — иначе если
+    новых строк меньше, чем было в предыдущей пересборке, старые «хвостовые»
+    строки остаются висеть (см. инцидент 30.06.2026 — Никита Фоменко
+    задублировался на дашборде после череды быстрых рестартов бота)."""
+    try:
+        _svc().spreadsheets().values().clear(spreadsheetId=SPREADSHEET_ID, range=f"Дашборд!{range_}").execute()
+    except Exception as ex:
+        log.warning(f"_clear_block: не удалось очистить {range_}: {ex}")
+
+
 def _rebuild_dashboard(dt):
     try:
         # Блок 1: кто сейчас на работе
         entries = get_open_entries_all()
         live_rows = [[e["name"], e.get("location", ""), e["arrival"]] for e in entries] \
             if entries else [["Сейчас никто не на работе", "", ""]]
+        _clear_block("A6:C21")
         _write("Дашборд", "A6", live_rows)
 
         # Блок 4: GPS-аномалии (последние 20, новые сверху)
@@ -945,6 +957,7 @@ def _rebuild_dashboard(dt):
         anomalies = list(reversed(anomalies))[:20]
         anomaly_rows = [[r[0], r[1], r[3], r[4], r[8]] for r in anomalies] \
             if anomalies else [["Аномалий не найдено", "", "", "", ""]]
+        _clear_block("A31:E52")
         _write("Дашборд", "A31", anomaly_rows)
 
         emp_rows = _read("Сотрудники", "A2:E200")
@@ -977,6 +990,7 @@ def _rebuild_dashboard(dt):
             summary_rows.append([name, total, days_present, auto_closed, f"{pct}%"])
 
         if summary_rows:
+            _clear_block("A55:E79")
             _write("Дашборд", "A55", summary_rows)
 
         # Реестр уведомлений за сегодня — план (включая ещё не наступившие) + факт
@@ -990,6 +1004,7 @@ def _rebuild_dashboard(dt):
             ]
             for p in plan
         ] if plan else [["—", "—", "—", "—", "на сегодня нет сотрудников с графиком"]]
+        _clear_block("A82:E120")
         _write("Дашборд", "A82", notif_rows)
     except Exception as ex:
         log.warning(f"update_dashboard: сбой обновления дашборда: {ex}")
