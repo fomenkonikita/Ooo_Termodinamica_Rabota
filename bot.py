@@ -454,7 +454,11 @@ def btn_shift_start(message):
     if sheets.find_open_entry(emp["name"]):
         bot.send_message(message.chat.id, "⚠️ Смена уже начата!")
         return
-    ask_location(message.chat.id, message.from_user.id, "arrival")
+    # Водитель/сервис не привязаны к одному объекту (несколько локаций за
+    # день) — без выбора объекта и без проверки радиуса, просто фиксируем
+    # геолокацию начала смены.
+    _state[message.from_user.id] = {"step": "geo_arrival", "data": {"location": ""}}
+    bot.send_message(message.chat.id, "📍 Поделитесь геолокацией:", reply_markup=location_kb())
 
 
 @bot.message_handler(func=lambda m: m.text == "🏁 Закончил смену")
@@ -559,8 +563,9 @@ def handle_location(message):
 
         sheets.record_arrival(emp["name"], emp["type"], loc_name, dt, telegram_id=uid)
         icon = "✅" if emp["type"] == "объект" else "🚗"
+        loc_line = f"📍 Объект: <b>{loc_name}</b>\n" if loc_name else ""
         bot.send_message(message.chat.id,
-            f"{icon} Приход записан!\n📍 Объект: <b>{loc_name}</b>\n🕒 {dt.strftime('%H:%M')}{dist_msg}",
+            f"{icon} {'Приход' if emp['type'] == 'объект' else 'Смена начата'}!\n{loc_line}🕒 {dt.strftime('%H:%M')}{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
         run_background(sheets.update_monthly_on_arrival, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, loc_name)
