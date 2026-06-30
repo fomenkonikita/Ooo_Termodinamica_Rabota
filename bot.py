@@ -648,8 +648,8 @@ def job_resync_green():
 
 
 def job_update_dashboard():
-    """Каждые 30 мин: обновляет код-зависимые блоки листа «Дашборд»
-    (месячная сводка по сотрудникам, реестр уведомлений за сегодня)."""
+    """Каждые 5 мин: обновляет все код-зависимые блоки листа «Дашборд»
+    (кто на работе, GPS-аномалии, месячная сводка, реестр уведомлений)."""
     sheets.update_dashboard(now())
 
 
@@ -773,7 +773,7 @@ if __name__ == "__main__":
     scheduler = BackgroundScheduler()
     scheduler.add_job(job_schedule_check,"interval", minutes=5)            # каждые 5 мин: до/после начала, до конца
     scheduler.add_job(job_resync_green,  "interval", minutes=5)            # каждые 5 мин: подсветка зелёным тех, кто на смене
-    scheduler.add_job(job_update_dashboard, "interval", minutes=30)        # каждые 30 мин: месячная сводка + реестр уведомлений на Дашборде
+    scheduler.add_job(job_update_dashboard, "interval", minutes=5)         # каждые 5 мин: все код-зависимые блоки Дашборда
     scheduler.add_job(job_close_21,      "cron",     hour=21, minute=0)   # 21:00 авто-закрытие всех + кнопка продления
     scheduler.add_job(job_remind_2350,   "cron",     hour=23, minute=50)  # 23:50 напоминание продлившим
     scheduler.add_job(job_hard_close,    "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие

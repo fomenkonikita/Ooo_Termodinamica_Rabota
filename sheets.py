@@ -732,10 +732,29 @@ def _write_monthly(name, dt, hours_decimal):
 
 
 def update_dashboard(dt):
-    """Заполняет код-зависимые блоки листа «Дашборд»: месячная сводка по
-    сотрудникам (блок с A54) и реестр уведомлений за сегодня (блок с A81).
-    Живые блоки (кто на работе, GPS-аномалии) — формулы, сами не трогаем."""
+    """Заполняет все код-зависимые блоки листа «Дашборд»: кто сейчас на работе
+    (A6), месячная сводка по сотрудникам (A55), GPS-аномалии (A31), реестр
+    уведомлений за сегодня (A82). Раньше живые блоки были формулами QUERY, но
+    дата в Журнале хранится как настоящая дата (не текст) — сравнение с
+    TEXT(TODAY()) в формулах ru_RU локали ломалось. Пишем кодом — надёжнее."""
     try:
+        # Блок 1: кто сейчас на работе
+        entries = get_open_entries_all()
+        live_rows = [[e["name"], e.get("location", ""), e["arrival"]] for e in entries] \
+            if entries else [["Сейчас никто не на работе", "", ""]]
+        _write("Дашборд", "A6", live_rows)
+
+        # Блок 4: GPS-аномалии (последние 20, новые сверху)
+        try:
+            gps_rows = _read("GPS лог", "A2:I5000")
+        except Exception:
+            gps_rows = []
+        anomalies = [r for r in gps_rows if len(r) >= 9 and str(r[8]).strip()]
+        anomalies = list(reversed(anomalies))[:20]
+        anomaly_rows = [[r[0], r[1], r[3], r[4], r[8]] for r in anomalies] \
+            if anomalies else [["Аномалий не найдено", "", "", "", ""]]
+        _write("Дашборд", "A31", anomaly_rows)
+
         emp_rows = _read("Сотрудники", "A2:E200")
         employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
 
