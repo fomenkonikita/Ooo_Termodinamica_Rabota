@@ -755,18 +755,33 @@ def job_hard_close():
 
 
 def job_reconcile():
-    """00:10 — сверка вчерашнего дня: Журнал vs лист месяца, автодозаполнение пропусков."""
+    """00:10 — сверка вчерашнего дня: Журнал vs лист месяца (пропуски) +
+    целостность каждой записи Журнала (Отработано vs реальная разница
+    уход-приход, см. инцидент 30.06.2026)."""
     yesterday = now() - timedelta(days=1)
+    lines = []
+
     try:
-        fixed = sheets.reconcile_day(yesterday)
+        fixed_gaps = sheets.reconcile_day(yesterday)
     except Exception as ex:
         log.warning(f"Reconcile error: {ex}")
-        return
-    if fixed:
-        lines = [f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b>",
-                  "Найдены и исправлены пропуски в листе месяца:"]
-        for f in fixed:
+        fixed_gaps = []
+    if fixed_gaps:
+        lines.append(f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b> — дозаполнены пропуски:")
+        for f in fixed_gaps:
             lines.append(f"  • {f['name']} — {f['hours']}ч")
+
+    try:
+        fixed_integrity = sheets.verify_journal_integrity()
+    except Exception as ex:
+        log.warning(f"Integrity check error: {ex}")
+        fixed_integrity = []
+    if fixed_integrity:
+        lines.append("⚠️ <b>Найдены неверные часы в Журнале — исправлено:</b>")
+        for f in fixed_integrity:
+            lines.append(f"  • {f['name']} ({f['date']}): {f['was']} → {f['now']}")
+
+    if lines:
         text = "\n".join(lines)
         for admin_id in ADMIN_IDS:
             try:
@@ -776,12 +791,33 @@ def job_reconcile():
         run_background(sheets.update_dashboard, now())
 
 
+WATCHDOG_TIMEOUT_SEC = 600  # 10 минут без единого успешного запроса к Google = считаем зависшим
+
+
+def run_watchdog():
+    """Сторож: если 10 минут подряд НИ ОДИН запрос к Google API не прошёл
+    успешно (см. sheets.last_successful_api_call), бот сам себя завершает —
+    Render тут же поднимает новый процесс. Без этого зависание могло длиться
+    45+ минут, пока Render сам не заметит (инцидент 30.06.2026)."""
+    import time as _time
+    while True:
+        _time.sleep(60)
+        stale_for = _time.time() - sheets.last_successful_api_call
+        if stale_for > WATCHDOG_TIMEOUT_SEC:
+            log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — принудительный перезапуск процесса")
+            os._exit(1)
+
+
 def run_health_server():
     from flask import Flask
+    import time as _time
     app = Flask(__name__)
 
     @app.route("/")
     def health():
+        stale_for = _time.time() - sheets.last_successful_api_call
+        if stale_for > WATCHDOG_TIMEOUT_SEC:
+            return f"STALE: no successful Google API call in {int(stale_for)}s", 503
         return "OK", 200
 
     @app.route("/privacy")
@@ -810,6 +846,7 @@ def run_health_server():
 if __name__ == "__main__":
     import threading
     threading.Thread(target=run_health_server, daemon=True).start()
+    threading.Thread(target=run_watchdog, daemon=True).start()
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(job_schedule_check,"interval", minutes=5)            # каждые 5 мин: до/после начала, до конца

@@ -16,6 +16,11 @@ log = logging.getLogger(__name__)
 
 _RETRIABLE = (ssl.SSLError, ConnectionError, TimeoutError, OSError)
 
+# Время последнего УСПЕШНОГО запроса к Google — читает watchdog в bot.py,
+# чтобы понять, что бот завис (см. инцидент 30.06.2026, 45 минут простоя
+# без единой попытки самовосстановления).
+last_successful_api_call = time.time()
+
 
 def _execute(request, max_retries=3):
     """Выполняет запрос к Google API с повтором при транзитных сетевых сбоях
@@ -24,10 +29,13 @@ def _execute(request, max_retries=3):
     в табель» багов 30.06.2026: единичный сбой сети тихо терял запись,
     а наружный try/except это просто проглатывал). Любой вызов .execute()
     в этом файле должен идти через эту функцию."""
+    global last_successful_api_call
     last_exc = None
     for attempt in range(max_retries):
         try:
-            return request.execute()
+            result = request.execute()
+            last_successful_api_call = time.time()
+            return result
         except _RETRIABLE as ex:
             last_exc = ex
             if attempt < max_retries - 1:
