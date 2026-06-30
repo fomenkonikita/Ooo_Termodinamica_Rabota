@@ -3,6 +3,7 @@ import ssl
 import time
 import calendar
 import logging
+import threading
 from datetime import datetime, timedelta, date
 
 from google.oauth2.credentials import Credentials
@@ -763,12 +764,25 @@ def _write_monthly(name, dt, hours_decimal):
         _write(sheet, f"{col}{row_num}", [[hours_decimal]])
 
 
+_dashboard_lock = threading.Lock()
+
+
 def update_dashboard(dt):
     """Заполняет все код-зависимые блоки листа «Дашборд»: кто сейчас на работе
     (A6), месячная сводка по сотрудникам (A55), GPS-аномалии (A31), реестр
     уведомлений за сегодня (A82). Раньше живые блоки были формулами QUERY, но
     дата в Журнале хранится как настоящая дата (не текст) — сравнение с
-    TEXT(TODAY()) в формулах ru_RU локали ломалось. Пишем кодом — надёжнее."""
+    TEXT(TODAY()) в формулах ru_RU локали ломалось. Пишем кодом — надёжнее.
+
+    Не запускается параллельно сама с собой (приход/уход у нескольких
+    сотрудников почти одновременно + таймер раз в 5 мин могли создавать кучу
+    одновременных потоков по 8-10 запросов каждый — лишняя нагрузка именно
+    в моменты, когда сеть и так нестабильна). Если уже идёт пересборка —
+    просто выходим, следующий вызов (через 5 мин или по новому событию)
+    подхватит актуальные данные."""
+    if not _dashboard_lock.acquire(blocking=False):
+        log.info("update_dashboard: пересборка уже идёт, пропускаем")
+        return
     try:
         # Блок 1: кто сейчас на работе
         entries = get_open_entries_all()
@@ -833,3 +847,5 @@ def update_dashboard(dt):
         _write("Дашборд", "A82", notif_rows)
     except Exception as ex:
         log.warning(f"update_dashboard: сбой обновления дашборда: {ex}")
+    finally:
+        _dashboard_lock.release()
