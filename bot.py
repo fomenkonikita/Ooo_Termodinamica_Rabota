@@ -526,6 +526,19 @@ def job_schedule_check():
                 log.warning(f"Admin schedule report failed: {ex}")
 
 
+def job_resync_green():
+    """Каждые 5 мин: подсвечивает зелёным всех, кто сейчас на смене.
+    Подстраховка от тихих сбоев _mark_monthly_present при самом приходе
+    (см. инцидент 30.06.2026 — Андрющенко был на смене, но без подсветки)."""
+    entries = sheets.get_open_entries_all()
+    dt = now()
+    for e in entries:
+        try:
+            sheets._mark_monthly_present(e["name"], dt)
+        except Exception as ex:
+            log.warning(f"job_resync_green: сбой для {e['name']}: {ex}")
+
+
 def job_close_21():
     """21:00 — авто-закрытие ВСЕХ открытых смен (макс. 8ч) + кнопка продления."""
     entries = sheets.get_open_entries_all()
@@ -645,6 +658,7 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(job_schedule_check,"interval", minutes=5)            # каждые 5 мин: до/после начала, до конца
+    scheduler.add_job(job_resync_green,  "interval", minutes=5)            # каждые 5 мин: подсветка зелёным тех, кто на смене
     scheduler.add_job(job_close_21,      "cron",     hour=21, minute=0)   # 21:00 авто-закрытие всех + кнопка продления
     scheduler.add_job(job_remind_2350,   "cron",     hour=23, minute=50)  # 23:50 напоминание продлившим
     scheduler.add_job(job_hard_close,    "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие
