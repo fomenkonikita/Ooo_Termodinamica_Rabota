@@ -18,15 +18,39 @@ log = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET", 5))
-ADMIN_IDS = {224397927}  # Никита Фоменко  ← сюда добавить ID Алекса
+ADMIN_IDS = {224397927, 1988448060}  # Никита Фоменко, Александр Лоцманов
 
-bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML")
+
+class _BotExceptionHandler(telebot.ExceptionHandler):
+    """Глобальный перехватчик: ошибка в одном хендлере не должна ронять весь процесс
+    (см. инцидент 30.06.2026 — бот падал и перезапускался из-за единичной ошибки
+    Telegram API в одном callback-хендлере, теряя на это несколько минут)."""
+    def handle(self, exception):
+        log.warning(f"Необработанное исключение в хендлере: {exception}")
+        return True  # помечаем как обработанное, чтобы polling не падал
+
+
+bot = telebot.TeleBot(BOT_TOKEN, parse_mode="HTML", exception_handler=_BotExceptionHandler())
 
 # Состояния: {user_id: {"step": str, "data": dict}}
 _state = {}
 
 # Трекер отправленных уведомлений по графику: "Имя_ДД.ММ.ГГГГ_r/l"
 _schedule_notified: set = set()
+
+
+def safe_answer_callback(call_id, text=None):
+    try:
+        bot.answer_callback_query(call_id, text) if text else bot.answer_callback_query(call_id)
+    except Exception as ex:
+        log.warning(f"answer_callback_query failed: {ex}")
+
+
+def safe_clear_markup(chat_id, message_id):
+    try:
+        bot.edit_message_reply_markup(chat_id, message_id, reply_markup=None)
+    except Exception as ex:
+        log.warning(f"edit_message_reply_markup failed: {ex}")
 
 
 def now():
@@ -193,7 +217,7 @@ def reg_name(message):
 def reg_type(call):
     uid = call.from_user.id
     if _state.get(uid, {}).get("step") != "reg_type":
-        bot.answer_callback_query(call.id)
+        safe_answer_callback(call.id)
         return
 
     emp_type = call.data.split(":", 1)[1]
@@ -203,21 +227,21 @@ def reg_type(call):
     existing = sheets.get_employee(str(uid))
     if existing:
         _state.pop(uid, None)
-        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        safe_clear_markup(call.message.chat.id, call.message.message_id)
         bot.send_message(call.message.chat.id,
             f"Вы уже зарегистрированы как <b>{existing['name']}</b>.",
             reply_markup=main_kb(existing["type"], is_admin=(uid in ADMIN_IDS)))
-        bot.answer_callback_query(call.id)
+        safe_answer_callback(call.id)
         return
 
     sheets.register_employee(str(uid), name, emp_type)
     _state.pop(uid, None)
 
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
         f"✅ Зарегистрированы как <b>{name}</b> ({emp_type})!\n\nВыберите действие:",
         reply_markup=main_kb(emp_type, is_admin=(uid in ADMIN_IDS)))
-    bot.answer_callback_query(call.id)
+    safe_answer_callback(call.id)
 
 
 # ── Выбор объекта ──────────────────────────────────────────────────────────────
@@ -236,18 +260,18 @@ def on_location_selected(call):
     uid   = call.from_user.id
     state = _state.get(uid, {})
     if state.get("step") != "location_select":
-        bot.answer_callback_query(call.id)
+        safe_answer_callback(call.id)
         return
 
     loc_name = call.data.split(":", 1)[1]
     action   = state["data"]["action"]
     _state[uid] = {"step": f"geo_{action}", "data": {"location": loc_name}}
 
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
         f"📍 Объект: <b>{loc_name}</b>\nТеперь поделитесь геолокацией:",
         reply_markup=location_kb())
-    bot.answer_callback_query(call.id)
+    safe_answer_callback(call.id)
 
 
 # ── «Я ещё на работе» ─────────────────────────────────────────────────────────
@@ -257,17 +281,17 @@ def cb_still_working(call):
     uid = call.from_user.id
     emp = sheets.get_employee(str(uid))
     if not emp:
-        bot.answer_callback_query(call.id, "❌ Не зарегистрированы")
+        safe_answer_callback(call.id, "❌ Не зарегистрированы")
         return
 
     row_num = int(call.data.split(":")[1])
     _state[uid] = {"step": "geo_still_working", "data": {"row_num": row_num}}
 
-    bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+    safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
         "📍 Отправьте геолокацию для подтверждения:",
         reply_markup=location_kb())
-    bot.answer_callback_query(call.id)
+    safe_answer_callback(call.id)
 
 
 # ── Кнопки сотрудника на объекте ───────────────────────────────────────────────
