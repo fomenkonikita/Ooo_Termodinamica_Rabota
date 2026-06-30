@@ -356,6 +356,55 @@ def _clear_monthly_auto(name, dt):
     _write(sheet, f"{col}{row_num}", [[""]])
     _set_cell_color(sheet, row_num, day, 1.0, 1.0, 1.0)  # белый
 
+def _ensure_gps_log_sheet():
+    meta     = _svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID).execute()
+    existing = {s["properties"]["title"] for s in meta["sheets"]}
+    if "GPS лог" in existing:
+        return
+    _svc().spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": "GPS лог"}}}]}
+    ).execute()
+    _write("GPS лог", "A1", [["Дата", "Время", "TG ID", "Имя", "Объект", "Lat", "Lon", "Accuracy", "Подозрение"]])
+
+
+def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt):
+    """Логирует GPS-замер при отметке и возвращает список причин подозрения на подмену
+    геолокации (пустой список = замер выглядит нормально). Не блокирует отметку —
+    только сигнал для админа."""
+    try:
+        _ensure_gps_log_sheet()
+        lat_r = round(lat, 6)
+        lon_r = round(lon, 6)
+
+        reasons = []
+        if not accuracy or accuracy <= 0:
+            reasons.append("нет данных о точности GPS (horizontal_accuracy)")
+
+        rows = _read("GPS лог", "A2:H5000")
+        for row in rows:
+            if len(row) < 7:
+                continue
+            if row[2].strip() != str(telegram_id) or row[4].strip() != location:
+                continue
+            try:
+                prev_lat, prev_lon = float(row[5]), float(row[6])
+            except Exception:
+                continue
+            if round(prev_lat, 6) == lat_r and round(prev_lon, 6) == lon_r:
+                reasons.append(f"координаты побитово совпадают с визитом {row[0]} {row[1]}")
+                break
+
+        _append("GPS лог", [
+            dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M"), str(telegram_id), name, location,
+            lat_r, lon_r, accuracy if accuracy else "", "; ".join(reasons),
+        ])
+        return reasons
+    except Exception as ex:
+        log.warning(f"log_gps_and_check: сбой проверки GPS для {name}: {ex}")
+        return []
+
+
 def record_waypoint(name, lat, lon, dt):
     _append("Точки водителей", [
         dt.strftime("%d.%m.%Y"),

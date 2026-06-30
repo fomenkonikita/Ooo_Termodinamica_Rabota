@@ -46,6 +46,22 @@ def haversine(lat1, lon1, lat2, lon2):
     return 2 * R * asin(sqrt(a))
 
 
+def check_gps_and_alert(uid, emp_name, location, lat, lon, accuracy, dt):
+    """Логирует GPS-замер и шлёт админам алерт при подозрении на подмену координат.
+    Не блокирует отметку — только сигнал для проверки вручную."""
+    reasons = sheets.log_gps_and_check(uid, emp_name, location, lat, lon, accuracy, dt)
+    if not reasons:
+        return
+    text = (f"⚠️ <b>Подозрение на подмену GPS</b>\n"
+            f"Сотрудник: {emp_name}\nОбъект: {location}\n"
+            f"Время: {dt.strftime('%H:%M')}\n" + "\n".join(f"• {r}" for r in reasons))
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, text)
+        except Exception as ex:
+            log.warning(f"GPS alert failed: {ex}")
+
+
 def main_kb(emp_type, is_admin=False):
     kb = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     if emp_type == "объект":
@@ -329,12 +345,13 @@ def handle_location(message):
         bot.send_message(message.chat.id, "❌ Вы не зарегистрированы. Напишите /start")
         return
 
-    state = _state.pop(uid, {})
-    step  = state.get("step", "")
-    data  = state.get("data", {})
-    lat   = message.location.latitude
-    lon   = message.location.longitude
-    dt    = now()
+    state    = _state.pop(uid, {})
+    step     = state.get("step", "")
+    data     = state.get("data", {})
+    lat      = message.location.latitude
+    lon      = message.location.longitude
+    accuracy = message.location.horizontal_accuracy
+    dt       = now()
 
     # Водитель — точка маршрута
     if step == "geo_waypoint":
@@ -361,7 +378,9 @@ def handle_location(message):
         sheets.reopen_entry(row_num, emp["name"], dt)
         sheets.update_last_activity(emp["name"], dt.strftime("%H:%M"))
         entry = sheets.get_entry_by_row(row_num)
-        sheets.update_employee_location(uid, entry.get("location", "") if entry else "")
+        still_loc = entry.get("location", "") if entry else ""
+        sheets.update_employee_location(uid, still_loc)
+        check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
         bot.send_message(message.chat.id,
             f"✅ <b>Подтверждено! Вы на работе.</b>\n"
             f"🕒 {dt.strftime('%H:%M')}\n"
@@ -386,6 +405,7 @@ def handle_location(message):
 
         sheets.record_arrival(emp["name"], emp["type"], loc_name, dt)
         sheets.update_employee_location(uid, loc_name)
+        check_gps_and_alert(uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         icon = "✅" if emp["type"] == "объект" else "🚗"
         bot.send_message(message.chat.id,
             f"{icon} Приход записан!\n📍 Объект: <b>{loc_name}</b>\n🕒 {dt.strftime('%H:%M')}{dist_msg}",
@@ -410,6 +430,7 @@ def handle_location(message):
             return
         worked = sheets.record_departure(emp["name"], dt, open_entry)
         sheets.update_employee_location(uid, "")
+        check_gps_and_alert(uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         bot.send_message(message.chat.id,
             f"🚪 Уход записан!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
