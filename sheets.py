@@ -356,11 +356,13 @@ def get_entry_by_row(row_num):
         }
     return None
 
-def record_arrival(name, emp_type, location, dt):
+def record_arrival(name, emp_type, location, dt, telegram_id=""):
     """Только критичная запись в Журнал (источник правды) — быстро, 1 запрос к API.
     Месячный лист обновляется отдельно через update_monthly_on_arrival, обычно
     в фоновом потоке, чтобы не задерживать ответ пользователю (см. инцидент
-    30.06.2026 — бот «висел» на отметке из-за 8-10 последовательных запросов)."""
+    30.06.2026 — бот «висел» на отметке из-за 8-10 последовательных запросов).
+    telegram_id пишется в колонку J — стабильный ключ сотрудника, не меняется
+    при переименовании в Сотрудники (см. sync_employee_names)."""
     _append("Журнал", [
         dt.strftime("%d.%m.%Y"),
         name,
@@ -368,6 +370,7 @@ def record_arrival(name, emp_type, location, dt):
         location,
         dt.strftime("%H:%M"),
         "", "", "", "",
+        str(telegram_id),
     ])
 
 
@@ -765,6 +768,47 @@ def _write_monthly(name, dt, hours_decimal):
 
 
 _dashboard_lock = threading.Lock()
+
+
+def sync_employee_names(dt):
+    """Самопочинка: если сотрудника переименовали в листе Сотрудники (имя там
+    не привязано жёстко ни к чему), его прошлые записи в Журнале и в листе
+    текущего месяца остаются под старым именем — статистика «теряется»
+    (см. инцидент 30.06.2026, Роман → Роман Рященко). TG ID в Сотрудники
+    никогда не меняется, поэтому он — надёжный ключ: сверяем по нему и
+    переименовываем старые записи автоматически, без ручного вмешательства."""
+    try:
+        emp_rows = _read("Сотрудники", "A2:E200")
+        id_to_name = {row[0].strip(): row[1].strip() for row in emp_rows if len(row) >= 2 and row[0].strip()}
+
+        journal_rows = _read("Журнал", "A2:J3000")
+        renames = {}
+        for i, row in enumerate(journal_rows):
+            if len(row) < 10 or not str(row[9]).strip():
+                continue
+            tg_id    = str(row[9]).strip()
+            old_name = row[1].strip()
+            new_name = id_to_name.get(tg_id)
+            if new_name and new_name != old_name:
+                _write("Журнал", f"B{i+2}", [[new_name]])
+                renames[old_name] = new_name
+
+        if not renames:
+            return
+
+        sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+        month_rows = _read(sheet, "A2:A100")
+        month_names = {r[0].strip() for r in month_rows if r}
+        for old_name, new_name in renames.items():
+            if new_name in month_names:
+                continue  # строка с новым именем уже есть — не сливаем, чтобы не потерять данные
+            for i, row in enumerate(month_rows):
+                if row and row[0].strip() == old_name:
+                    _write(sheet, f"A{i+2}", [[new_name]])
+                    log.info(f"sync_employee_names: «{old_name}» -> «{new_name}» в {sheet}")
+                    break
+    except Exception as ex:
+        log.warning(f"sync_employee_names: сбой: {ex}")
 
 
 def update_dashboard(dt):

@@ -507,7 +507,7 @@ def handle_location(message):
         else:
             dist_msg = ""
 
-        sheets.record_arrival(emp["name"], emp["type"], loc_name, dt)
+        sheets.record_arrival(emp["name"], emp["type"], loc_name, dt, telegram_id=uid)
         icon = "✅" if emp["type"] == "объект" else "🚗"
         bot.send_message(message.chat.id,
             f"{icon} Приход записан!\n📍 Объект: <b>{loc_name}</b>\n🕒 {dt.strftime('%H:%M')}{dist_msg}",
@@ -652,9 +652,13 @@ def job_resync_green():
 
 
 def job_update_dashboard():
-    """Каждые 5 мин: обновляет все код-зависимые блоки листа «Дашборд»
-    (кто на работе, GPS-аномалии, месячная сводка, реестр уведомлений)."""
-    sheets.update_dashboard(now())
+    """Каждые 5 мин: синхронизирует переименования сотрудников по TG ID
+    (см. sync_employee_names), затем обновляет все код-зависимые блоки
+    листа «Дашборд» (кто на работе, GPS-аномалии, месячная сводка,
+    реестр уведомлений)."""
+    dt = now()
+    sheets.sync_employee_names(dt)
+    sheets.update_dashboard(dt)
 
 
 def job_close_21():
