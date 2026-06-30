@@ -188,16 +188,18 @@ def btn_notifications(message):
     if message.from_user.id not in ADMIN_IDS:
         return
     dt = now()
-    notifs = sheets.get_today_notifications(dt)
+    plan = sheets.get_today_notification_plan(dt)
 
     lines = [f"📋 <b>Уведомления за {dt.strftime('%d.%m')}</b>\n"]
-    if not notifs:
-        lines.append("Сегодня ещё ничего не отправлялось (или график пуст).")
+    if not plan:
+        lines.append("На сегодня нет сотрудников с заданным графиком.")
     else:
-        for n in notifs[-25:]:
-            time_, name, type_, planned, status = n[1], n[2], n[3], n[4], n[5]
-            icon = "✅" if status == "отправлено" else "❌"
-            lines.append(f"{icon} {time_} — {name} ({type_}, план {planned}) — {status}")
+        icons = {"отправлено": "✅", "запланировано": "⏳", "ПРОПУЩЕНО": "❗"}
+        for p in plan:
+            icon = icons.get(p["status"], "❌")
+            time_str = p["actual_time"] or p["planned_at"].strftime("%H:%M")
+            tilde = "" if p["actual_time"] else "~"
+            lines.append(f"{icon} {tilde}{time_str} — {p['name']} ({p['type']}) — {p['status']}")
 
     # Сводка: кто не отметился сегодня вообще
     emps = sheets.get_all_employees_with_schedule()

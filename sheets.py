@@ -249,6 +249,54 @@ def get_today_notifications(dt):
     return [r for r in rows if r and r[0] == today]
 
 
+def get_today_notification_plan(dt):
+    """Полный план уведомлений на сегодня — и уже отправленные, и ещё предстоящие,
+    и пропущенные (время прошло, а в логе записи нет — сигнал реального сбоя).
+    Возвращает список dict, отсортированный по времени: planned_at, name, type,
+    status (отправлено / запланировано / ПРОПУЩЕНО / ошибка: ...), actual_time."""
+    sent = get_today_notifications(dt)
+    sent_map = {}
+    for n in sent:
+        if len(n) >= 6:
+            sent_map[(n[2].strip(), n[3].strip())] = (n[1], n[5])
+
+    emps = get_all_employees_with_schedule()
+    plan = []
+    for emp in emps:
+        if not emp.get("schedule"):
+            continue
+        work_days = emp.get("work_days")
+        if work_days and dt.weekday() not in work_days:
+            continue
+        name = emp["name"]
+        try:
+            t = datetime.strptime(emp["schedule"], "%H:%M")
+            start_dt = dt.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+            plan.append({"planned_at": start_dt - timedelta(minutes=10), "name": name, "type": "до начала смены"})
+        except Exception:
+            pass
+        end_time_str = emp.get("end_time", "")
+        if end_time_str:
+            try:
+                t = datetime.strptime(end_time_str, "%H:%M")
+                end_dt = dt.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+                plan.append({"planned_at": end_dt - timedelta(minutes=30), "name": name, "type": "до конца смены"})
+            except Exception:
+                pass
+
+    for p in plan:
+        key = (p["name"], p["type"])
+        if key in sent_map:
+            p["actual_time"], p["status"] = sent_map[key]
+        elif p["planned_at"] > dt:
+            p["actual_time"], p["status"] = None, "запланировано"
+        else:
+            p["actual_time"], p["status"] = None, "ПРОПУЩЕНО"
+
+    plan.sort(key=lambda p: p["planned_at"])
+    return plan
+
+
 def has_closed_entry_today(name, dt):
     """Есть ли у сотрудника уже ЗАВЕРШЁННАЯ (приход+уход) запись сегодня —
     признак того, что повторный приход может быть случайным/тестовым (см.
@@ -720,12 +768,17 @@ def update_dashboard(dt):
         if summary_rows:
             _write("Дашборд", "A55", summary_rows)
 
-        # Реестр уведомлений за сегодня
-        notifs = get_today_notifications(dt)
+        # Реестр уведомлений за сегодня — план (включая ещё не наступившие) + факт
+        plan = get_today_notification_plan(dt)
         notif_rows = [
-            [(n[i] if len(n) > i else "") for i in (1, 2, 3, 4, 5)]
-            for n in notifs[-30:]
-        ] if notifs else [["—", "—", "—", "—", "сегодня уведомлений ещё не было"]]
+            [
+                p["actual_time"] or p["planned_at"].strftime("%H:%M"),
+                p["name"], p["type"],
+                p["planned_at"].strftime("%H:%M"),
+                p["status"],
+            ]
+            for p in plan
+        ] if plan else [["—", "—", "—", "—", "на сегодня нет сотрудников с графиком"]]
         _write("Дашборд", "A82", notif_rows)
     except Exception as ex:
         log.warning(f"update_dashboard: сбой обновления дашборда: {ex}")
