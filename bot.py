@@ -150,7 +150,18 @@ def cmd_start(message):
 
 @bot.message_handler(func=lambda m: _state.get(m.from_user.id, {}).get("step") == "reg_name")
 def reg_name(message):
-    uid  = message.from_user.id
+    uid = message.from_user.id
+
+    # Защита от дубля: если сотрудник уже активен, не даём процессу регистрации
+    # принять текст кнопки меню за имя (см. инцидент 30.06.2026)
+    emp = sheets.get_employee(str(uid))
+    if emp:
+        _state.pop(uid, None)
+        bot.send_message(message.chat.id,
+            f"Вы уже зарегистрированы как <b>{emp['name']}</b>.",
+            reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        return
+
     name = message.text.strip()
     if len(name) < 2:
         bot.send_message(message.chat.id, "Введите имя (минимум 2 символа):")
@@ -171,6 +182,17 @@ def reg_type(call):
 
     emp_type = call.data.split(":", 1)[1]
     name     = _state[uid]["data"]["name"]
+
+    # Повторная защита от дубля прямо перед записью (см. инцидент 30.06.2026)
+    existing = sheets.get_employee(str(uid))
+    if existing:
+        _state.pop(uid, None)
+        bot.edit_message_reply_markup(call.message.chat.id, call.message.message_id, reply_markup=None)
+        bot.send_message(call.message.chat.id,
+            f"Вы уже зарегистрированы как <b>{existing['name']}</b>.",
+            reply_markup=main_kb(existing["type"], is_admin=(uid in ADMIN_IDS)))
+        bot.answer_callback_query(call.id)
+        return
 
     sheets.register_employee(str(uid), name, emp_type)
     _state.pop(uid, None)

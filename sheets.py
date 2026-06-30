@@ -1,10 +1,13 @@
 import os
 import calendar
+import logging
 from datetime import datetime, timedelta, date
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+
+log = logging.getLogger(__name__)
 
 CLIENT_ID      = os.environ["GOOGLE_CLIENT_ID"]
 CLIENT_SECRET  = os.environ["GOOGLE_CLIENT_SECRET"]
@@ -230,10 +233,16 @@ def record_arrival(name, emp_type, location, dt):
         dt.strftime("%H:%M"),
         "", "", "", "",
     ])
-    # Создаём строку в месячном листе сразу при приходе
-    _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
-    _ensure_employee_row(name, dt)
-    _mark_monthly_present(name, dt)
+    # Создаём строку в месячном листе сразу при приходе.
+    # Журнал — источник правды, уже записан выше: сбой здесь не должен
+    # ломать подтверждение прихода пользователю (см. инцидент 30.06.2026,
+    # когда новые сотрудники не появлялись в месячном табеле).
+    try:
+        _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
+        _ensure_employee_row(name, dt)
+        _mark_monthly_present(name, dt)
+    except Exception as ex:
+        log.warning(f"record_arrival: не удалось обновить месячный лист для {name}: {ex}")
 
 
 def _mark_monthly_present(name, dt):
@@ -297,8 +306,11 @@ def record_departure(name, dt, open_entry):
         hours_str, hours_decimal = "0:00", 0.0
 
     _write("Журнал", f"F{row_num}:I{row_num}", [[departure_str, hours_str, "✅", ""]])
-    _write_monthly(name, dt, hours_decimal)
-    _reset_monthly_color(name, dt)
+    try:
+        _write_monthly(name, dt, hours_decimal)
+        _reset_monthly_color(name, dt)
+    except Exception as ex:
+        log.warning(f"record_departure: не удалось обновить месячный лист для {name}: {ex}")
     return hours_str
 
 def update_last_activity(name, time_str):
