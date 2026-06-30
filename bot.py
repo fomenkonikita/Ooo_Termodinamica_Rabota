@@ -282,6 +282,7 @@ def btn_shift_end(message):
         return
     dt     = now()
     worked = sheets.record_departure(emp["name"], dt, open_entry)
+    sheets.update_employee_location(message.from_user.id, "")
     bot.send_message(message.chat.id,
         f"🏁 Смена завершена!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>",
         reply_markup=main_kb(emp["type"], is_admin=(message.from_user.id in ADMIN_IDS)))
@@ -337,6 +338,8 @@ def handle_location(message):
                     return
         sheets.reopen_entry(row_num, emp["name"], dt)
         sheets.update_last_activity(emp["name"], dt.strftime("%H:%M"))
+        entry = sheets.get_entry_by_row(row_num)
+        sheets.update_employee_location(uid, entry.get("location", "") if entry else "")
         bot.send_message(message.chat.id,
             f"✅ <b>Подтверждено! Вы на работе.</b>\n"
             f"🕒 {dt.strftime('%H:%M')}\n"
@@ -360,6 +363,7 @@ def handle_location(message):
             dist_msg = ""
 
         sheets.record_arrival(emp["name"], emp["type"], loc_name, dt)
+        sheets.update_employee_location(uid, loc_name)
         icon = "✅" if emp["type"] == "объект" else "🚗"
         bot.send_message(message.chat.id,
             f"{icon} Приход записан!\n📍 Объект: <b>{loc_name}</b>\n🕒 {dt.strftime('%H:%M')}{dist_msg}",
@@ -383,6 +387,7 @@ def handle_location(message):
             bot.send_message(message.chat.id, "⚠️ Нет открытой отметки.", reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
             return
         worked = sheets.record_departure(emp["name"], dt, open_entry)
+        sheets.update_employee_location(uid, "")
         bot.send_message(message.chat.id,
             f"🚪 Уход записан!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
@@ -494,6 +499,7 @@ def job_close_21():
             sheets.auto_close_entry(e["row"], e["name"], e["arrival"], close_dt)
 
             if tg_id:
+                sheets.update_employee_location(tg_id, "")
                 bot.send_message(int(tg_id),
                     f"⚠️ <b>Авто-закрытие смены</b>\n"
                     f"🕒 Время закрытия: {close_dt.strftime('%H:%M')} (8 часов с {e['arrival']})\n"
@@ -543,6 +549,7 @@ def job_hard_close():
 
             tg_id = e.get("telegram_id", "")
             if tg_id:
+                sheets.update_employee_location(tg_id, "")
                 try:
                     emp = sheets.get_employee(tg_id)
                     bot.send_message(int(tg_id),

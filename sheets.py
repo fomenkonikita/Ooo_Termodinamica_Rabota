@@ -120,6 +120,14 @@ def register_employee(telegram_id, name, emp_type):
     # A=ID, B=Имя, C=Тип, D=Локация(пусто), E=Активен
     _append("Сотрудники", [telegram_id, name, emp_type, "", "да"])
 
+def update_employee_location(telegram_id, location):
+    """Пишет текущий объект (или '' если ушёл) в колонку D листа Сотрудники."""
+    rows = _read("Сотрудники", "A2:A200")
+    for i, row in enumerate(rows):
+        if row and str(row[0]).strip() == str(telegram_id):
+            _write("Сотрудники", f"D{i + 2}", [[location]])
+            return
+
 _DAYS_MAP = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6}
 
 def parse_work_days(days_str):
@@ -225,6 +233,31 @@ def record_arrival(name, emp_type, location, dt):
     # Создаём строку в месячном листе сразу при приходе
     _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
     _ensure_employee_row(name, dt)
+    _mark_monthly_present(name, dt)
+
+
+def _mark_monthly_present(name, dt):
+    """Подсвечивает зелёным день в месячном листе — сотрудник сейчас на смене."""
+    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+    rows  = _read(sheet, "A2:A100")
+    for i, row in enumerate(rows):
+        if row and row[0].strip() == name:
+            _set_cell_color(sheet, i + 2, dt.day, 0.7, 0.9, 0.7)  # зелёный
+            return
+
+
+def _reset_monthly_color(name, dt):
+    """Возвращает обычный цвет ячейки (серый для выходных, белый для будней)."""
+    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+    rows  = _read(sheet, "A2:A100")
+    for i, row in enumerate(rows):
+        if row and row[0].strip() == name:
+            row_num = i + 2
+            if date(dt.year, dt.month, dt.day).weekday() >= 5:
+                _set_cell_color(sheet, row_num, dt.day, 0.85, 0.85, 0.85)  # серый выходной
+            else:
+                _set_cell_color(sheet, row_num, dt.day, 1.0, 1.0, 1.0)  # белый
+            return
 
 
 def _ensure_employee_row(name, dt):
@@ -265,6 +298,7 @@ def record_departure(name, dt, open_entry):
 
     _write("Журнал", f"F{row_num}:I{row_num}", [[departure_str, hours_str, "✅", ""]])
     _write_monthly(name, dt, hours_decimal)
+    _reset_monthly_color(name, dt)
     return hours_str
 
 def update_last_activity(name, time_str):
@@ -290,6 +324,7 @@ def reopen_entry(row_num, name, dt):
     else:
         entry_dt = dt
     _clear_monthly_auto(name, entry_dt)
+    _mark_monthly_present(name, entry_dt)
 
 def _clear_monthly_auto(name, dt):
     """Очищает 'авто' и сбрасывает цвет ячейки в месячном листе."""
@@ -363,26 +398,45 @@ def get_extended_entries():
 def auto_close_entry(row_num, name, arrival_str, close_dt):
     """Закрывает запись автоматически, помечает ⚠️ и красит ячейку в месячном листе."""
     departure_str = close_dt.strftime("%H:%M")
-    _write("Журнал", f"F{row_num}:I{row_num}", [
-        [departure_str, "⚠️ авто", "⚠️ авто", ""]
-    ])
-    _mark_monthly_auto(name, close_dt)
+    try:
+        arr = datetime.strptime(arrival_str, "%H:%M")
+        dep = datetime.strptime(departure_str, "%H:%M")
+        if dep < arr:
+            dep += timedelta(days=1)
+        total_min     = int((dep - arr).total_seconds() // 60)
+        hours_str     = f"{total_min // 60}:{total_min % 60:02d}"
+        hours_decimal = round(total_min / 60, 2)
+    except Exception:
+        hours_str, hours_decimal = "0:00", 0.0
 
-def _mark_monthly_auto(name, dt):
+    _write("Журнал", f"F{row_num}:I{row_num}", [
+        [departure_str, hours_str, "⚠️ авто", ""]
+    ])
+    _mark_monthly_auto(name, close_dt, hours_decimal)
+
+def _mark_monthly_auto(name, dt, hours_decimal):
     sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
     day   = dt.day
 
+    _ensure_monthly_sheet(sheet, dt.year, dt.month)
     rows = _read(sheet, "A2:A100")
     row_num = None
     for i, row in enumerate(rows):
         if row and row[0].strip() == name:
             row_num = i + 2
             break
+    if row_num is None:
+        _ensure_employee_row(name, dt)
+        rows = _read(sheet, "A2:A100")
+        for i, row in enumerate(rows):
+            if row and row[0].strip() == name:
+                row_num = i + 2
+                break
     if not row_num:
         return
 
     col = _col(day)
-    _write(sheet, f"{col}{row_num}", [["авто"]])
+    _write(sheet, f"{col}{row_num}", [[hours_decimal]])
     _set_cell_color(sheet, row_num, day, 1.0, 0.4, 0.4)  # красный
 
 def _ensure_monthly_sheet(sheet_name, year, month):
