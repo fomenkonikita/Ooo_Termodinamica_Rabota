@@ -333,16 +333,23 @@ def get_today_notification_plan(dt):
             except Exception:
                 pass
 
+    # Окна догонки должны совпадать с условиями в job_schedule_check (bot.py),
+    # иначе статус на дашборде разойдётся с тем, что бот реально делает.
+    # "до начала смены": planned_at = начало-10мин, шлёт пока minutes_late<=130
+    # "до конца смены": planned_at = конец-30мин, шлёт в [-30; 45] minutes_late
+    catchup_window = {"до начала смены": (None, 130), "до конца смены": (-30, 45)}
+
     for p in plan:
         key = (p["name"], p["type"])
         minutes_late = (dt - p["planned_at"]).total_seconds() / 60
+        lo, hi = catchup_window.get(p["type"], (None, 120))
         if key in sent_map:
             p["actual_time"], p["status"] = sent_map[key]
         elif p["planned_at"] > dt:
             p["actual_time"], p["status"] = None, "запланировано"
-        elif minutes_late <= 120:
-            # В пределах догоняющего окна job_schedule_check (см. bot.py) —
-            # ещё не «пропущено», просто ждём ближайший запуск джобы (≤5 мин)
+        elif (lo is None or minutes_late >= lo) and minutes_late <= hi:
+            # В пределах догоняющего окна job_schedule_check — ещё не
+            # «пропущено», просто ждём ближайший запуск джобы (≤5 мин)
             p["actual_time"], p["status"] = None, "ожидает отправки"
         else:
             p["actual_time"], p["status"] = None, "ПРОПУЩЕНО"

@@ -624,9 +624,10 @@ def job_schedule_check():
             if end_dt:
                 minutes_to_end = (end_dt - current).total_seconds() / 60
                 end_before_key = f"{name}_{today}_be"
-                # Окно расширено до 2ч «вдогонку» — та же логика, что и для
-                # напоминания о начале (см. комментарий выше).
-                if -120 <= minutes_to_end < 30 and end_before_key not in _schedule_notified:
+                # Окно: от часа до конца смены и максимум 15 мин после неё.
+                # Идеал — ровно за 30 мин (см. инцидент 30.06.2026 — частые
+                # рестарты бота промахивались мимо узкого 5-минутного окна).
+                if -15 <= minutes_to_end <= 60 and end_before_key not in _schedule_notified:
                     if sheets.find_open_entry(name):
                         _schedule_notified.add(end_before_key)
                         late = minutes_to_end < 25
