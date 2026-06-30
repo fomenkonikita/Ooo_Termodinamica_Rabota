@@ -563,6 +563,27 @@ def job_hard_close():
             log.warning(f"Hard close error for {e.get('name', '?')}: {ex}")
 
 
+def job_reconcile():
+    """00:10 — сверка вчерашнего дня: Журнал vs лист месяца, автодозаполнение пропусков."""
+    yesterday = now() - timedelta(days=1)
+    try:
+        fixed = sheets.reconcile_day(yesterday)
+    except Exception as ex:
+        log.warning(f"Reconcile error: {ex}")
+        return
+    if fixed:
+        lines = [f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b>",
+                  "Найдены и исправлены пропуски в листе месяца:"]
+        for f in fixed:
+            lines.append(f"  • {f['name']} — {f['hours']}ч")
+        text = "\n".join(lines)
+        for admin_id in ADMIN_IDS:
+            try:
+                bot.send_message(admin_id, text)
+            except Exception as ex:
+                log.warning(f"Reconcile alert failed: {ex}")
+
+
 def run_health_server():
     from flask import Flask
     app = Flask(__name__)
@@ -584,6 +605,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_close_21,      "cron",     hour=21, minute=0)   # 21:00 авто-закрытие всех + кнопка продления
     scheduler.add_job(job_remind_2350,   "cron",     hour=23, minute=50)  # 23:50 напоминание продлившим
     scheduler.add_job(job_hard_close,    "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие
+    scheduler.add_job(job_reconcile,     "cron",     hour=0,  minute=10)  # 00:10 сверка прошедшего дня
     scheduler.start()
     log.info("Attendance bot started (scheduler active)")
     bot.infinity_polling(timeout=30, long_polling_timeout=20)

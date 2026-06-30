@@ -483,6 +483,53 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             body={"requests": requests}
         ).execute()
 
+def reconcile_day(dt):
+    """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
+    Возвращает список исправленных записей [{name, date, hours}]."""
+    date_str = dt.strftime("%d.%m.%Y")
+    rows = _read("Журнал", "A2:I2000")
+    totals = {}
+    for row in rows:
+        if len(row) < 7 or row[0].strip() != date_str:
+            continue
+        name      = row[1].strip()
+        hours_str = str(row[6]).strip()
+        try:
+            h, m = hours_str.split(":")
+            hours_decimal = round(int(h) + int(m) / 60, 2)
+        except Exception:
+            continue
+        if hours_decimal <= 0:
+            continue
+        totals[name] = totals.get(name, 0) + hours_decimal
+
+    fixed = []
+    if not totals:
+        return fixed
+
+    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+    _ensure_monthly_sheet(sheet, dt.year, dt.month)
+    sheet_rows  = _read(sheet, "A2:AH100")
+    name_to_row = {row[0].strip(): i + 2 for i, row in enumerate(sheet_rows) if row}
+
+    for name, total in totals.items():
+        row_num = name_to_row.get(name)
+        if row_num is None:
+            _ensure_employee_row(name, dt)
+            sheet_rows  = _read(sheet, "A2:AH100")
+            name_to_row = {row[0].strip(): i + 2 for i, row in enumerate(sheet_rows) if row}
+            row_num = name_to_row.get(name)
+        if row_num is None:
+            continue
+        row         = sheet_rows[row_num - 2] if row_num - 2 < len(sheet_rows) else []
+        current_val = row[dt.day] if len(row) > dt.day else ""
+        if not str(current_val).strip():
+            col = _col(dt.day)
+            _write(sheet, f"{col}{row_num}", [[total]])
+            fixed.append({"name": name, "date": date_str, "hours": total})
+    return fixed
+
+
 def _write_monthly(name, dt, hours_decimal):
     sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
     day   = dt.day
