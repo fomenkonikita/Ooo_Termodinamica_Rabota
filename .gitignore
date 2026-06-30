@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+clean_monthly.py
+clean_employees.py
+clean.bat
+preview_schedule.py
+start.bat

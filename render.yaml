@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: attendance-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_DRIVE_REFRESH_TOKEN
+        sync: false
+      - key: SPREADSHEET_ID
+        sync: false
+      - key: TZ_OFFSET
+        value: "5"

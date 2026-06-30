@@ -1,0 +1,6 @@
+pyTelegramBotAPI==4.23.0
+google-auth==2.29.0
+google-api-python-client==2.127.0
+python-dotenv==1.0.1
+APScheduler==3.10.4
+flask==3.0.3
