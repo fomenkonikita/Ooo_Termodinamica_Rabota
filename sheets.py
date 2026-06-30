@@ -6,8 +6,10 @@ import logging
 import threading
 from datetime import datetime, timedelta, date
 
+import httplib2
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 
 log = logging.getLogger(__name__)
@@ -64,7 +66,13 @@ def _svc():
                     raise
                 log.warning(f"Сбой обновления токена Google (попытка {attempt+1}/3): {ex}")
                 time.sleep(0.5 * (attempt + 1))
-        _service = build("sheets", "v4", credentials=creds)
+        # httplib2.Http() без timeout может зависнуть НАВСЕГДА, если Google не
+        # отвечает (не ошибка — просто тишина) — тогда retry в _execute() не
+        # спасает, потому что .execute() сам никогда не возвращается и не
+        # бросает исключение. См. инцидент 30.06.2026: бот завис на 45+ минут
+        # без единой строчки в логах. 30с — явный таймаут вместо зависания.
+        authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
+        _service = build("sheets", "v4", http=authed_http)
     return _service
 
 def _col(n):
