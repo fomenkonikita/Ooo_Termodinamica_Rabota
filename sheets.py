@@ -172,6 +172,16 @@ def register_employee(telegram_id, name, emp_type):
     # A=ID, B=Имя, C=Тип, D=Локация(пусто), E=Активен
     _append("Сотрудники", [telegram_id, name, emp_type, "", "да"])
 
+def update_employee_type(telegram_id, new_type):
+    """Меняет тип уже зарегистрированного сотрудника (объект/водитель/сервис)
+    через команду /тип, без повторной регистрации."""
+    rows = _read("Сотрудники", "A2:A200")
+    for i, row in enumerate(rows):
+        if row and str(row[0]).strip() == str(telegram_id):
+            _write("Сотрудники", f"C{i + 2}", [[new_type]])
+            return True
+    return False
+
 def update_employee_location(telegram_id, location):
     """Пишет текущий объект (или '' если ушёл) в колонку D листа Сотрудники.
     Не должна ронять остальной обработчик (см. инцидент 30.06.2026 — упала и

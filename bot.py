@@ -141,6 +141,49 @@ def type_label(emp_type):
     return {"объект": "На объекте", "водитель": "Водитель", "сервис": "Сервис"}.get(emp_type, emp_type)
 
 
+def change_type_kb():
+    kb = types.InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        types.InlineKeyboardButton("🏗 На объекте", callback_data="changetype:объект"),
+    )
+    kb.add(
+        types.InlineKeyboardButton("🚗 Водитель", callback_data="changetype:водитель"),
+        types.InlineKeyboardButton("🔧 Сервис",   callback_data="changetype:сервис"),
+    )
+    return kb
+
+
+@bot.message_handler(commands=["тип"])
+def cmd_change_type(message):
+    uid = message.from_user.id
+    emp = sheets.get_employee(str(uid))
+    if not emp:
+        bot.send_message(message.chat.id, "❌ Вы не зарегистрированы. Напишите /start")
+        return
+    if sheets.find_open_entry(emp["name"]):
+        bot.send_message(message.chat.id, "⚠️ Сначала закройте текущую смену (отметьте «Ушёл»/«Закончил смену»), потом меняйте тип.")
+        return
+    bot.send_message(message.chat.id,
+        f"Сейчас вы: <b>{type_label(emp['type'])}</b>.\nВыберите новый тип:",
+        reply_markup=change_type_kb())
+
+
+@bot.callback_query_handler(func=lambda c: c.data.startswith("changetype:"))
+def cb_change_type(call):
+    uid = call.from_user.id
+    new_type = call.data.split(":", 1)[1]
+    emp = sheets.get_employee(str(uid))
+    safe_clear_markup(call.message.chat.id, call.message.message_id)
+    if not emp:
+        safe_answer_callback(call.id, "❌ Не зарегистрированы")
+        return
+    sheets.update_employee_type(str(uid), new_type)
+    bot.send_message(call.message.chat.id,
+        f"✅ Тип изменён на <b>{type_label(new_type)}</b>.\nВыберите действие:",
+        reply_markup=main_kb(new_type, is_admin=(uid in ADMIN_IDS)))
+    safe_answer_callback(call.id)
+
+
 def still_working_kb(row_num):
     kb = types.InlineKeyboardMarkup()
     kb.add(types.InlineKeyboardButton("✅ Я ещё на работе", callback_data=f"still_working:{row_num}"))
