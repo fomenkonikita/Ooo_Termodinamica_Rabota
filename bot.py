@@ -1043,6 +1043,15 @@ def cmd_restart(message):
 if __name__ == "__main__":
     import threading
     threading.Thread(target=run_health_server, daemon=True).start()  # Flask как daemon — оригинальная архитектура
+
+    if os.environ.get("DISABLE_HEAVY_JOBS"):
+        # Режим preflight/CI: только Flask, без Telegram polling и scheduler.
+        # Реальные соединения не устанавливаются — нужен только health check и замер памяти.
+        import time as _t
+        log.info("DISABLE_HEAVY_JOBS=1: preflight режим — Flask запущен, ждём 15 сек")
+        _t.sleep(15)
+        os._exit(0)
+
     threading.Thread(target=run_watchdog, daemon=True).start()
 
     scheduler = BackgroundScheduler()
