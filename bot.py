@@ -736,12 +736,25 @@ def job_resync_green():
 def job_update_dashboard():
     """Каждые 5 мин: закрывает orphaned записи прошлых дней (краш бота =
     job_close_21 не сработал), синхронизирует переименования по TG ID,
-    пересчитывает Итого-за-сегодня, обновляет дашборд."""
+    пересчитывает Итого-за-сегодня, обновляет дашборд.
+    Каждый шаг изолирован — сбой в одном не отменяет остальные."""
     dt = now()
-    sheets.close_orphaned_entries(dt)
-    sheets.sync_employee_names(dt)
-    sheets.resync_today_totals(dt)
-    sheets.update_dashboard(dt)
+    try:
+        sheets.close_orphaned_entries(dt)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
+    try:
+        sheets.sync_employee_names(dt)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: sync_employee_names: {ex}")
+    try:
+        sheets.resync_today_totals(dt)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: resync_today_totals: {ex}")
+    try:
+        sheets.update_dashboard(dt)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: update_dashboard: {ex}")
 
 
 def job_close_21():

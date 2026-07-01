@@ -720,11 +720,30 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     header = ["Имя"] + list(range(1, days_in_month + 1)) + ["Итого"]
     _write(sheet_name, "A1", [header])
 
-    # Красим субботы и воскресенья серым
+    # Форматирование: выходные серые, заголовок жирный, freeze строка+колонка
     meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
     sheet_id = next(s["properties"]["sheetId"] for s in meta["sheets"]
                     if s["properties"]["title"] == sheet_name)
-    requests = []
+    requests = [
+        # Закрепить строку 1 и колонку A (Имя)
+        {"updateSheetProperties": {
+            "properties": {
+                "sheetId": sheet_id,
+                "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1},
+            },
+            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+        }},
+        # Жирный заголовок (строка 1, все колонки)
+        {"repeatCell": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": 0, "endRowIndex": 1,
+                "startColumnIndex": 0, "endColumnIndex": days_in_month + 2,
+            },
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
+            "fields": "userEnteredFormat.textFormat.bold",
+        }},
+    ]
     for day in range(1, days_in_month + 1):
         if date(year, month, day).weekday() >= 5:  # Сб=5, Вс=6
             requests.append({
@@ -742,11 +761,10 @@ def _ensure_monthly_sheet(sheet_name, year, month):
                     "fields": "userEnteredFormat.backgroundColor",
                 }
             })
-    if requests:
-        _execute(_svc().spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID,
-            body={"requests": requests}
-        ))
+    _execute(_svc().spreadsheets().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": requests}
+    ))
 
 def close_orphaned_entries(current_dt):
     """Закрывает открытые записи из ПРОШЛЫХ дней (job_close_21 не сработал из-за
@@ -1004,17 +1022,21 @@ def _clear_block(range_):
 
 
 def _rebuild_dashboard(dt):
+    today_str = dt.strftime("%d.%m.%Y")
+
+    # Блок 1: кто сейчас на работе — только СЕГОДНЯШНИЕ открытые записи
     try:
-        # Блок 1: кто сейчас на работе — только СЕГОДНЯШНИЕ открытые записи
         entries = get_open_entries_all()
-        today_str = dt.strftime("%d.%m.%Y")
         entries = [e for e in entries if e.get("date") == today_str]
         live_rows = [[e["name"], e.get("location", ""), e["arrival"]] for e in entries] \
             if entries else [["Сейчас никто не на работе", "", ""]]
         _clear_block("A6:C21")
         _write("Дашборд", "A6", live_rows)
+    except Exception as ex:
+        log.warning(f"_rebuild_dashboard block1 (кто на работе): {ex}")
 
-        # Блок 4: GPS-аномалии (последние 20, новые сверху)
+    # Блок GPS-аномалии (последние 20, новые сверху)
+    try:
         try:
             gps_rows = _read("GPS лог", "A2:I5000")
         except Exception:
@@ -1025,7 +1047,11 @@ def _rebuild_dashboard(dt):
             if anomalies else [["Аномалий не найдено", "", "", "", ""]]
         _clear_block("A31:E52")
         _write("Дашборд", "A31", anomaly_rows)
+    except Exception as ex:
+        log.warning(f"_rebuild_dashboard block_gps (аномалии): {ex}")
 
+    # Блок месячная сводка по сотрудникам
+    try:
         emp_rows = _read("Сотрудники", "A2:E200")
         employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
 
@@ -1058,19 +1084,30 @@ def _rebuild_dashboard(dt):
         if summary_rows:
             _clear_block("A55:E79")
             _write("Дашборд", "A55", summary_rows)
+    except Exception as ex:
+        log.warning(f"_rebuild_dashboard block_monthly (сводка): {ex}")
 
-        # Реестр уведомлений за сегодня — план (включая ещё не наступившие) + факт
+    # Блок реестр уведомлений за сегодня — план + факт
+    try:
         plan = get_today_notification_plan(dt)
-        notif_rows = [
-            [
-                p["actual_time"] or p["planned_at"].strftime("%H:%M"),
-                p["name"], p["type"],
-                p["planned_at"].strftime("%H:%M"),
-                p["status"],
+        if plan:
+            notif_rows = [
+                [
+                    p["actual_time"] or p["planned_at"].strftime("%H:%M"),
+                    p["name"], p["type"],
+                    p["planned_at"].strftime("%H:%M"),
+                    p["status"],
+                ]
+                for p in plan
             ]
-            for p in plan
-        ] if plan else [["—", "—", "—", "—", "на сегодня нет сотрудников с графиком"]]
+        else:
+            # Нет плановых уведомлений (расписание не задано), но могут быть фактические
+            sent = get_today_notifications(dt)
+            if sent:
+                notif_rows = [[r[1], r[2], r[3], r[4], r[5]] for r in sent if len(r) >= 6]
+            else:
+                notif_rows = [["—", "—", "—", "—", "уведомлений сегодня нет"]]
         _clear_block("A82:E120")
         _write("Дашборд", "A82", notif_rows)
     except Exception as ex:
-        log.warning(f"update_dashboard: сбой обновления дашборда: {ex}")
+        log.warning(f"_rebuild_dashboard block_notif (реестр): {ex}")
