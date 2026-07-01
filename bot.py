@@ -903,11 +903,10 @@ def job_reconcile():
 
     if lines:
         text = "\n".join(lines)
-        for admin_id in ADMIN_IDS:
-            try:
-                bot.send_message(admin_id, text)
-            except Exception as ex:
-                log.warning(f"Reconcile alert failed: {ex}")
+        try:
+            bot.send_message(224397927, text)  # ночная сверка — только Никите
+        except Exception as ex:
+            log.warning(f"Reconcile alert failed: {ex}")
         run_background(sheets.update_dashboard, now())
 
 
