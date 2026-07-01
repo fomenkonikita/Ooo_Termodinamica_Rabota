@@ -92,6 +92,18 @@ def _col(n):
         result = chr(65 + r) + result
     return result
 
+def _norm_date(s):
+    """Нормализует дату из Google Sheets: '1.7.2026' → '01.07.2026'.
+    USER_ENTERED заставляет Sheets хранить дату как serial и возвращать
+    без ведущих нулей в зависимости от формата столбца."""
+    try:
+        parts = str(s).strip().split(".")
+        if len(parts) == 3:
+            return f"{int(parts[0]):02d}.{int(parts[1]):02d}.{parts[2].strip()}"
+    except Exception:
+        pass
+    return str(s).strip()
+
 def _read(sheet, range_):
     res = _execute(_svc().spreadsheets().values().get(
         spreadsheetId=SPREADSHEET_ID,
@@ -308,7 +320,7 @@ def get_closed_entries_today(dt):
     return [
         {"name": r[1].strip(), "status": r[7].strip() if len(r) >= 8 else ""}
         for r in rows
-        if len(r) >= 6 and r[0] == date_str and r[1].strip() and r[5].strip()
+        if len(r) >= 6 and _norm_date(r[0]) == date_str and r[1].strip() and r[5].strip()
     ]
 
 
@@ -379,7 +391,7 @@ def get_today_notifications(dt):
     except Exception:
         return []
     today = dt.strftime("%d.%m.%Y")
-    return [r for r in rows if r and r[0] == today]
+    return [r for r in rows if r and _norm_date(r[0]) == today]
 
 
 def get_today_notification_plan(dt):
@@ -449,7 +461,7 @@ def has_closed_entry_today(name, dt):
     date_str = dt.strftime("%d.%m.%Y")
     rows = _read("Журнал", "A2:I2000")
     for row in rows:
-        if len(row) >= 6 and row[0] == date_str and row[1].strip() == name and str(row[5]).strip():
+        if len(row) >= 6 and _norm_date(row[0]) == date_str and row[1].strip() == name and str(row[5]).strip():
             return True
     return False
 
@@ -685,7 +697,8 @@ def get_open_entries_all():
                 result.append({
                     "row":           i + 2,
                     "name":          name,
-                    "date":          row[0],
+                    "date":          _norm_date(row[0]),
+                    "emp_type":      row[2].strip() if len(row) > 2 else "",
                     "arrival":       row[4],
                     "location":      row[3] if len(row) > 3 else "",
                     "telegram_id":   emp_map.get(name, ""),
@@ -980,7 +993,7 @@ def resync_today_totals(dt):
     try:
         date_str = dt.strftime("%d.%m.%Y")
         rows = _read("Журнал", "A2:I3000")
-        names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and r[0] == date_str}
+        names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and _norm_date(r[0]) == date_str}
     except Exception as ex:
         log.warning(f"resync_today_totals: сбой чтения журнала: {ex}")
         return
@@ -998,7 +1011,7 @@ def reconcile_day(dt):
     rows = _read("Журнал", "A2:I2000")
     totals = {}
     for row in rows:
-        if len(row) < 7 or row[0].strip() != date_str:
+        if len(row) < 7 or _norm_date(row[0]) != date_str:
             continue
         name      = row[1].strip()
         hours_str = str(row[6]).strip()
@@ -1236,8 +1249,13 @@ def _rebuild_dashboard(dt):
     try:
         entries = get_open_entries_all()
         entries = [e for e in entries if e.get("date") == today_str]
-        live_rows = [[e["name"], e.get("location", ""), e["arrival"]] for e in entries] \
-            if entries else [["Сейчас никто не на работе", "", ""]]
+        _type_labels = {"водитель": "Водитель 🚗", "сервис": "Сервис 🔧"}
+        live_rows = [
+            [e["name"],
+             e.get("location") or _type_labels.get(e.get("emp_type", ""), "—"),
+             e["arrival"]]
+            for e in entries
+        ] if entries else [["Сейчас никто не на работе", "", ""]]
         _clear_block("A6:C21")
         _write("Дашборд", "A6", live_rows)
     except Exception as ex:
