@@ -763,12 +763,17 @@ def job_resync_green():
     open_today = [e for e in all_open if e.get("date") == today_str]
     on_shift = {e["name"] for e in open_today}
 
+    log.info(f"job_resync_green: всего открытых={len(all_open)}, сегодня={len(open_today)}, "
+             f"на смене={list(on_shift)}, today_str={today_str}, "
+             f"даты в журнале={[e.get('date') for e in all_open]}")
+
     for e in open_today:
         try:
             sheets._ensure_employee_row(e["name"], dt)
             sheets._mark_monthly_present(e["name"], dt)
+            log.info(f"job_resync_green: зелёный установлен для {e['name']}")
         except Exception as ex:
-            log.warning(f"job_resync_green: green {e['name']}: {ex}")
+            log.warning(f"job_resync_green: green {e['name']}: {ex}", exc_info=True)
 
     # Кто ушёл сегодня — сбрасываем застрявший зелёный
     try:
