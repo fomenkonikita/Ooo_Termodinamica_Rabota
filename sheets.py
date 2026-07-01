@@ -966,14 +966,13 @@ def resync_today_totals(dt):
     except Exception as ex:
         log.warning(f"resync_today_totals: предзаполнение сотрудников: {ex}")
 
-    # Разовая починка застрявших цветов в предыдущем месяце (первые 7 дней нового)
+    # Сбросить застрявшие цвета предыдущего месяца — каждый цикл в первую неделю.
+    # Намеренно БЕЗ кэша: если close_orphaned_entries упал в прошлом цикле и записи
+    # ещё не были закрыты, следующий цикл должен повторить попытку, а не пропустить.
     if dt.day <= 7:
         try:
             prev = (dt.replace(day=1) - timedelta(days=1))
-            prev_sheet = f"{MONTHS_RU[prev.month]} {prev.year}"
-            if prev_sheet not in _color_reconciled_months:
-                reconcile_month_colors(prev)
-                _color_reconciled_months.add(prev_sheet)
+            reconcile_month_colors(prev)
         except Exception as ex:
             log.warning(f"resync_today_totals: prev month colors: {ex}")
 
@@ -1086,7 +1085,6 @@ def _write_monthly(name, dt, hours_decimal):
 
 
 _header_styled_months: set = set()    # кэш: не перекрашивать заголовок дважды
-_color_reconciled_months: set = set() # кэш: не пересчитывать цвета прошлых месяцев дважды
 
 
 def _apply_monthly_header_style(sheet_name, year, month):
