@@ -717,7 +717,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     _known_sheets.add(sheet_name)
 
     days_in_month = calendar.monthrange(year, month)[1]
-    header = ["Имя"] + list(range(1, days_in_month + 1)) + ["Итого"]
+    header = ["Сотрудник"] + list(range(1, days_in_month + 1)) + ["Итого"]
     _write(sheet_name, "A1", [header])
 
     # Форматирование: выходные серые, заголовок жирный, freeze строка+колонка
@@ -733,15 +733,33 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             },
             "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
         }},
-        # Жирный заголовок (строка 1, все колонки)
+        # Заголовок: синий фон + белый жирный текст
         {"repeatCell": {
             "range": {
                 "sheetId": sheet_id,
                 "startRowIndex": 0, "endRowIndex": 1,
                 "startColumnIndex": 0, "endColumnIndex": days_in_month + 2,
             },
-            "cell": {"userEnteredFormat": {"textFormat": {"bold": True}}},
-            "fields": "userEnteredFormat.textFormat.bold",
+            "cell": {"userEnteredFormat": {
+                "textFormat": {"bold": True,
+                               "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+                "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+            }},
+            "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor",
+        }},
+        # Колонка A (имена): 160px
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                      "startIndex": 0, "endIndex": 1},
+            "properties": {"pixelSize": 160},
+            "fields": "pixelSize",
+        }},
+        # Колонки дней + Итого: 36px каждая
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                      "startIndex": 1, "endIndex": days_in_month + 2},
+            "properties": {"pixelSize": 36},
+            "fields": "pixelSize",
         }},
     ]
     for day in range(1, days_in_month + 1):
@@ -857,6 +875,7 @@ def resync_today_totals(dt):
     try:
         sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
         _ensure_monthly_sheet(sheet, dt.year, dt.month)
+        _apply_monthly_header_style(sheet, dt.year, dt.month)  # синий заголовок + ширины
         emp_rows = _read("Сотрудники", "A2:E200")
         active_names = [r[1].strip() for r in emp_rows
                         if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
@@ -979,6 +998,66 @@ def _write_monthly(name, dt, hours_decimal):
     if row_num:
         col = _col(day)
         _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
+
+
+_header_styled_months: set = set()  # кэш: не перекрашивать заголовок дважды
+
+
+def _apply_monthly_header_style(sheet_name, year, month):
+    """Приводит заголовок месячного листа к единому стилю: 'Сотрудник', синий фон,
+    белый жирный текст. Нужна для листов созданных старым кодом (до 01.07.2026)."""
+    if sheet_name in _header_styled_months:
+        return
+    try:
+        days_in_month = calendar.monthrange(year, month)[1]
+        vals = _read(sheet_name, "A1:A1")
+        if vals and vals[0] and vals[0][0] == "Сотрудник":
+            # Заголовок уже правильный — только красим
+            pass
+        else:
+            header = ["Сотрудник"] + list(range(1, days_in_month + 1)) + ["Итого"]
+            _write(sheet_name, "A1", [header])
+
+        sheet_id = _get_sheet_id(sheet_name)
+        if sheet_id is None:
+            return
+        _execute(_svc().spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID,
+            body={"requests": [
+                # Синий заголовок
+                {"repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 0, "endRowIndex": 1,
+                        "startColumnIndex": 0, "endColumnIndex": days_in_month + 2,
+                    },
+                    "cell": {"userEnteredFormat": {
+                        "textFormat": {"bold": True,
+                                       "foregroundColor": {"red": 1.0, "green": 1.0, "blue": 1.0}},
+                        "backgroundColor": {"red": 0.267, "green": 0.447, "blue": 0.769},
+                    }},
+                    "fields": "userEnteredFormat.textFormat,userEnteredFormat.backgroundColor",
+                }},
+                # Колонка A (имена): 160px
+                {"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                              "startIndex": 0, "endIndex": 1},
+                    "properties": {"pixelSize": 160},
+                    "fields": "pixelSize",
+                }},
+                # Колонки дней + Итого: 36px каждая
+                {"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                              "startIndex": 1, "endIndex": days_in_month + 2},
+                    "properties": {"pixelSize": 36},
+                    "fields": "pixelSize",
+                }},
+            ]}
+        ))
+        _header_styled_months.add(sheet_name)
+        log.info(f"_apply_monthly_header_style: стиль применён для {sheet_name}")
+    except Exception as ex:
+        log.warning(f"_apply_monthly_header_style: {sheet_name}: {ex}")
 
 
 _dashboard_lock = threading.Lock()
