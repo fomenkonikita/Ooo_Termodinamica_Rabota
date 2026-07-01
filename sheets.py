@@ -298,6 +298,80 @@ def log_notification(name, type_, planned_at, status, text, dt):
         log.warning(f"log_notification: не удалось залогировать для {name}: {ex}")
 
 
+def get_closed_entries_today(dt):
+    """Закрытые записи за сегодня с их статусом (для сброса застрявшего зелёного)."""
+    date_str = dt.strftime("%d.%m.%Y")
+    try:
+        rows = _read("Журнал", "A2:I3000")
+    except Exception:
+        return []
+    return [
+        {"name": r[1].strip(), "status": r[7].strip() if len(r) >= 8 else ""}
+        for r in rows
+        if len(r) >= 6 and r[0] == date_str and r[1].strip() and r[5].strip()
+    ]
+
+
+def reconcile_month_colors(dt_month):
+    """Расставляет правильные цвета в месячном листе по данным Журнала:
+    закрытые вручную → белый/серый, авто-закрытые → красный.
+    Чинит 'застрявшие' зелёные ячейки от предыдущих месяцев."""
+    sheet = f"{MONTHS_RU[dt_month.month]} {dt_month.year}"
+    try:
+        month_rows = _read(sheet, "A2:A100")
+        name_to_row = {r[0].strip(): i + 2 for i, r in enumerate(month_rows) if r}
+        journal_rows = _read("Журнал", "A2:I3000")
+        sheet_id = _get_sheet_id(sheet)
+    except Exception as ex:
+        log.warning(f"reconcile_month_colors: {sheet}: {ex}")
+        return
+    if sheet_id is None:
+        return
+
+    month_prefix = f".{dt_month.month:02d}.{dt_month.year}"
+    requests = []
+    for row in journal_rows:
+        if len(row) < 6 or not row[5].strip():
+            continue  # нет ухода — пропускаем
+        date_str = row[0].strip()
+        if not date_str.endswith(month_prefix):
+            continue
+        name = row[1].strip()
+        status = row[7].strip() if len(row) >= 8 else ""
+        row_num = name_to_row.get(name)
+        if row_num is None:
+            continue
+        try:
+            day = int(date_str.split(".")[0])
+        except Exception:
+            continue
+        is_auto = "авто" in status
+        is_weekend = date(dt_month.year, dt_month.month, day).weekday() >= 5
+        if is_auto:
+            r, g, b = 1.0, 0.4, 0.4   # красный (авто-закрытие)
+        elif is_weekend:
+            r, g, b = 0.85, 0.85, 0.85  # серый (выходной)
+        else:
+            r, g, b = 1.0, 1.0, 1.0   # белый (обычный)
+        requests.append({"repeatCell": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
+                      "startColumnIndex": day, "endColumnIndex": day + 1},
+            "cell": {"userEnteredFormat": {
+                "backgroundColor": {"red": r, "green": g, "blue": b}
+            }},
+            "fields": "userEnteredFormat.backgroundColor",
+        }})
+    if requests:
+        try:
+            _execute(_svc().spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
+            ))
+            log.info(f"reconcile_month_colors: сброшено {len(requests)} ячеек в {sheet}")
+        except Exception as ex:
+            log.warning(f"reconcile_month_colors: batchUpdate: {ex}")
+
+
 def get_today_notifications(dt):
     """Реестр уведомлений за сегодня — для админ-кнопки."""
     try:
@@ -892,6 +966,17 @@ def resync_today_totals(dt):
     except Exception as ex:
         log.warning(f"resync_today_totals: предзаполнение сотрудников: {ex}")
 
+    # Разовая починка застрявших цветов в предыдущем месяце (первые 7 дней нового)
+    if dt.day <= 7:
+        try:
+            prev = (dt.replace(day=1) - timedelta(days=1))
+            prev_sheet = f"{MONTHS_RU[prev.month]} {prev.year}"
+            if prev_sheet not in _color_reconciled_months:
+                reconcile_month_colors(prev)
+                _color_reconciled_months.add(prev_sheet)
+        except Exception as ex:
+            log.warning(f"resync_today_totals: prev month colors: {ex}")
+
     # Пересчитать часы за сегодня — каждый сотрудник изолирован
     try:
         date_str = dt.strftime("%d.%m.%Y")
@@ -1000,7 +1085,8 @@ def _write_monthly(name, dt, hours_decimal):
         _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
 
 
-_header_styled_months: set = set()  # кэш: не перекрашивать заголовок дважды
+_header_styled_months: set = set()    # кэш: не перекрашивать заголовок дважды
+_color_reconciled_months: set = set() # кэш: не пересчитывать цвета прошлых месяцев дважды
 
 
 def _apply_monthly_header_style(sheet_name, year, month):

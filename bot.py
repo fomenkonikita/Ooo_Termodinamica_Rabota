@@ -740,23 +740,42 @@ def job_schedule_check():
 
 
 def job_resync_green():
-    """Каждые 5 мин: подсвечивает зелёным всех, кто сейчас на смене.
-    Подстраховка от тихих сбоев _mark_monthly_present при самом приходе
-    (см. инцидент 30.06.2026 — Андрющенко был на смене, но без подсветки).
-    Фильтрует только СЕГОДНЯШНИЕ открытые записи — иначе orphaned записи
-    прошлых дней красили бы текущий день. Также гарантирует что строка
-    в месячном листе существует перед покраской."""
-    entries = sheets.get_open_entries_all()
+    """Каждые 5 мин: авторитетно расставляет цвета сегодняшнего столбца
+    по данным Журнала — источник правды, а не результат удачных фоновых потоков.
+    Открытая смена сегодня → ЗЕЛЁНЫЙ.
+    Закрытая вручную сегодня → БЕЛЫЙ/СЕРЫЙ (сброс застрявшего зелёного).
+    Orphaned прошлых дней — игнорируются (их закрывает close_orphaned_entries)."""
     dt = now()
     today_str = dt.strftime("%d.%m.%Y")
-    for e in entries:
-        if e.get("date") != today_str:
-            continue
+
+    # Кто сейчас на смене (только сегодняшние открытые)
+    all_open = sheets.get_open_entries_all()
+    open_today = [e for e in all_open if e.get("date") == today_str]
+    on_shift = {e["name"] for e in open_today}
+
+    for e in open_today:
         try:
             sheets._ensure_employee_row(e["name"], dt)
             sheets._mark_monthly_present(e["name"], dt)
         except Exception as ex:
-            log.warning(f"job_resync_green: сбой для {e['name']}: {ex}")
+            log.warning(f"job_resync_green: green {e['name']}: {ex}")
+
+    # Кто ушёл сегодня — сбрасываем застрявший зелёный
+    try:
+        closed = sheets.get_closed_entries_today(dt)
+    except Exception as ex:
+        log.warning(f"job_resync_green: get_closed: {ex}")
+        closed = []
+
+    for e in closed:
+        if e["name"] in on_shift:
+            continue  # открыл новую смену — не трогаем
+        if "авто" in e.get("status", ""):
+            continue  # авто-закрытие красит _mark_monthly_auto, не трогаем
+        try:
+            sheets._reset_monthly_color(e["name"], dt)
+        except Exception as ex:
+            log.warning(f"job_resync_green: reset {e['name']}: {ex}")
 
 
 def job_update_dashboard():
