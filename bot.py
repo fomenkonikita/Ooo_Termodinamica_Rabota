@@ -73,7 +73,7 @@ def run_background(func, *args, **kwargs):
         try:
             func(*args, **kwargs)
         except Exception as ex:
-            log.warning(f"Фоновая задача {func.__name__} упала: {ex}")
+            log.warning(f"Фоновая задача {func.__name__} упала: {ex}", exc_info=True)
     threading.Thread(target=_runner, daemon=True).start()
 
 
@@ -98,6 +98,7 @@ def check_gps_and_alert(uid, emp_name, location, lat, lon, accuracy, dt):
     """Логирует GPS-замер и шлёт админам алерт при подозрении на подмену координат.
     Не блокирует отметку — только сигнал для проверки вручную."""
     reasons = sheets.log_gps_and_check(uid, emp_name, location, lat, lon, accuracy, dt)
+    reasons = [r for r in (reasons or []) if r]
     if not reasons:
         return
     text = (f"⚠️ <b>Подозрение на подмену GPS</b>\n"
@@ -233,7 +234,7 @@ def _show_status(chat_id):
             arr_dt   = dt.replace(hour=arr_time.hour, minute=arr_time.minute, second=0, microsecond=0)
             if arr_dt > dt:
                 arr_dt -= timedelta(days=1)
-            minutes  = int((dt - arr_dt).total_seconds() // 60)
+            minutes  = max(0, int((dt - arr_dt).total_seconds() // 60))
             h, m     = divmod(minutes, 60)
             duration = f"{h}ч {m}мин" if h else f"{m}мин"
         except Exception:
@@ -380,7 +381,7 @@ def reg_type(call):
 # ── Выбор объекта ──────────────────────────────────────────────────────────────
 
 def ask_location(chat_id, uid, action):
-    locs = sheets.get_all_locations()
+    locs = [l for l in sheets.get_all_locations() if l]
     if not locs:
         bot.send_message(chat_id, "❌ Нет объектов в таблице. Добавьте их в лист «Локации».")
         return
@@ -534,7 +535,7 @@ def handle_location(message):
     data     = state.get("data", {})
     lat      = message.location.latitude
     lon      = message.location.longitude
-    accuracy = message.location.horizontal_accuracy
+    accuracy = message.location.horizontal_accuracy or 0
     dt       = now()
 
     # Водитель — точка маршрута
@@ -543,6 +544,7 @@ def handle_location(message):
         bot.send_message(message.chat.id,
             f"📍 Точка записана\n🕒 {dt.strftime('%H:%M')}\n<code>{lat:.5f}, {lon:.5f}</code>",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        _state.pop(uid, None)
         return
 
     # Подтверждение «Я ещё на работе»
@@ -552,12 +554,13 @@ def handle_location(message):
             entry    = sheets.get_entry_by_row(row_num)
             loc_name = entry.get("location", "") if entry else ""
             loc      = sheets.get_location(loc_name)
-            if loc:
+            if loc and loc["lat"] is not None and loc["lon"] is not None:
                 dist = int(haversine(lat, lon, loc["lat"], loc["lon"]))
                 if dist > loc["radius"]:
                     bot.send_message(message.chat.id,
                         f"❌ Вы не на объекте! ({dist}м от {loc_name}). Подтверждение отклонено.",
                         reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+                    _state.pop(uid, None)
                     return
         sheets.reopen_entry(row_num, emp["name"], dt)
         bot.send_message(message.chat.id,
@@ -574,18 +577,20 @@ def handle_location(message):
             check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
             sheets.update_dashboard(dt)
         run_background(_followup)
+        _state.pop(uid, None)
         return
 
     loc_name = data.get("location", "")
 
     if step == "geo_arrival":
         loc = sheets.get_location(loc_name)
-        if loc:
+        if loc and loc["lat"] is not None and loc["lon"] is not None:
             dist = int(haversine(lat, lon, loc["lat"], loc["lon"]))
             if dist > loc["radius"]:
                 bot.send_message(message.chat.id,
                     f"❌ Вы не на объекте!\n📏 Расстояние: <b>{dist}м</b> (допустимо: {int(loc['radius'])}м)",
                     reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+                _state.pop(uid, None)
                 return
             dist_msg = f"\n📏 До объекта: {dist}м"
         else:
@@ -601,15 +606,17 @@ def handle_location(message):
         run_background(sheets.update_employee_location, uid, loc_name)
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         run_background(sheets.update_dashboard, dt)
+        _state.pop(uid, None)
 
     elif step == "geo_departure":
         loc = sheets.get_location(loc_name)
-        if loc:
+        if loc and loc["lat"] is not None and loc["lon"] is not None:
             dist = int(haversine(lat, lon, loc["lat"], loc["lon"]))
             if dist > loc["radius"]:
                 bot.send_message(message.chat.id,
                     f"❌ Вы не на объекте!\n📏 Расстояние: <b>{dist}м</b> (допустимо: {int(loc['radius'])}м)",
                     reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+                _state.pop(uid, None)
                 return
             dist_msg = f"\n📏 До объекта: {dist}м"
         else:
@@ -618,6 +625,7 @@ def handle_location(message):
         open_entry = sheets.find_open_entry(emp["name"])
         if not open_entry:
             bot.send_message(message.chat.id, "⚠️ Нет открытой отметки.", reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+            _state.pop(uid, None)
             return
         worked, hours_decimal = sheets.record_departure(emp["name"], dt, open_entry)
         bot.send_message(message.chat.id,
@@ -627,10 +635,12 @@ def handle_location(message):
         run_background(sheets.update_employee_location, uid, "")
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         run_background(sheets.update_dashboard, dt)
+        _state.pop(uid, None)
 
     else:
         bot.send_message(message.chat.id,
             "Используйте кнопки меню.", reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        _state.pop(uid, None)
 
 
 # ── Планировщик ───────────────────────────────────────────────────────────────
