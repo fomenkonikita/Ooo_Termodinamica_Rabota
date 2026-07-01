@@ -276,7 +276,7 @@ def get_location(name):
 
 def find_open_entry(name):
     # Журнал: A=Дата B=Имя C=Тип D=Объект E=Приход F=Уход G=Отработано H=Статус I=Посл.активность
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     for i, row in enumerate(rows):
         # Пропускаем строки где A не похоже на дату (TG ID и другой мусор)
         if str(row[0]).strip().count('.') != 2:
@@ -464,7 +464,7 @@ def has_closed_entry_today(name, dt):
     признак того, что повторный приход может быть случайным/тестовым (см.
     инцидент с риском «фантомных» часов при двойной отметке за день)."""
     date_str = dt.strftime("%d.%m.%Y")
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     for row in rows:
         if len(row) >= 6 and _norm_date(row[0]) == date_str and row[1].strip() == name and str(row[5]).strip():
             return True
@@ -598,7 +598,7 @@ def resync_green_for(name, dt):
 
 def update_last_activity(name, time_str):
     """Обновляет время последней активности (колонка I) в открытой записи Журнала."""
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     for i, row in enumerate(rows):
         if len(row) >= 5 and row[1].strip() == name:
             if len(row) < 6 or not str(row[5]).strip():
@@ -704,7 +704,7 @@ def get_open_entries_all():
     emp_rows = _read("Сотрудники", "A2:E200")
     emp_map = {row[1].strip(): row[0].strip() for row in emp_rows if len(row) >= 2}
 
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     result = []
     for i, row in enumerate(rows):
         # Пропускаем строки где A не похоже на дату (TG ID и другой мусор)
@@ -730,7 +730,7 @@ def get_extended_entries():
     emp_rows = _read("Сотрудники", "A2:E200")
     emp_map  = {row[1].strip(): row[0].strip() for row in emp_rows if len(row) >= 2}
 
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     result = []
     for i, row in enumerate(rows):
         if len(row) >= 8 and row[1].strip() and "продлено" in str(row[7]):
@@ -941,7 +941,7 @@ def verify_journal_integrity():
     из-за пересозданной git-истории)."""
     fixed = []
     try:
-        rows = _read("Журнал", "A2:J3000")
+        rows = _read("Журнал", "A2:J500")
         for i, row in enumerate(rows):
             if len(row) < 7 or not row[4].strip() or not row[5].strip():
                 continue
@@ -1027,7 +1027,7 @@ def reconcile_day(dt):
     """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
     Возвращает список исправленных записей [{name, date, hours}]."""
     date_str = dt.strftime("%d.%m.%Y")
-    rows = _read("Журнал", "A2:I2000")
+    rows = _read("Журнал", "A2:I500")
     totals = {}
     for row in rows:
         if len(row) < 7 or _norm_date(row[0]) != date_str:
@@ -1190,7 +1190,7 @@ def sync_employee_names(dt):
         emp_rows = _read("Сотрудники", "A2:E200")
         id_to_name = {row[0].strip(): row[1].strip() for row in emp_rows if len(row) >= 2 and row[0].strip()}
 
-        journal_rows = _read("Журнал", "A2:J3000")
+        journal_rows = _read("Журнал", "A2:J500")
         renames = {}
         for i, row in enumerate(journal_rows):
             if len(row) < 10 or not str(row[9]).strip():
