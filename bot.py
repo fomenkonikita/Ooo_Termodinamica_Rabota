@@ -118,8 +118,8 @@ def main_kb(emp_type, is_admin=False):
         kb.add("🚗 Начал смену", "🏁 Закончил смену")
         kb.add("📍 Отправить точку")
     if is_admin:
-        kb.add("📊 Статус")
-        kb.add("📋 Уведомления")
+        kb.add("📊 Статус", "📋 Уведомления")
+        kb.add("🔄 Обновить дашборд", "🔧 Сменить тип")
     return kb
 
 
@@ -281,6 +281,25 @@ def btn_notifications(message):
             lines.append(f"  • {name}")
 
     bot.send_message(message.chat.id, "\n".join(lines))
+
+
+@bot.message_handler(func=lambda m: m.text == "🔄 Обновить дашборд")
+def btn_refresh_dashboard(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    msg = bot.send_message(message.chat.id, "🔄 Обновляю дашборд...")
+    try:
+        job_update_dashboard()
+        bot.edit_message_text("✅ Дашборд обновлён", message.chat.id, msg.message_id)
+    except Exception as ex:
+        bot.edit_message_text(f"⚠️ Ошибка: {ex}", message.chat.id, msg.message_id)
+
+
+@bot.message_handler(func=lambda m: m.text == "🔧 Сменить тип")
+def btn_change_type(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    cmd_change_type(message)
 
 
 # ── /start ─────────────────────────────────────────────────────────────────────
