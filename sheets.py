@@ -748,6 +748,30 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             body={"requests": requests}
         ))
 
+def close_orphaned_entries(current_dt):
+    """Закрывает открытые записи из ПРОШЛЫХ дней (job_close_21 не сработал из-за
+    краша бота). Без этого сотрудник не может отметить приход — бот думает что
+    он ещё на смене. Закрывает по логике job_close_21: min(приход+8ч, 21:00)."""
+    today_str = current_dt.strftime("%d.%m.%Y")
+    entries = get_open_entries_all()
+    closed = []
+    for e in entries:
+        if e.get("date") == today_str:
+            continue
+        try:
+            entry_date = datetime.strptime(e["date"], "%d.%m.%Y")
+            arr = datetime.strptime(e["arrival"], "%H:%M")
+            close_by_hours = entry_date.replace(hour=arr.hour, minute=arr.minute) + timedelta(hours=8)
+            close_at_21 = entry_date.replace(hour=21, minute=0, second=0, microsecond=0)
+            close_dt = min(close_by_hours, close_at_21)
+            auto_close_entry(e["row"], e["name"], e["arrival"], close_dt)
+            closed.append({"name": e["name"], "date": e["date"]})
+            log.info(f"Закрыта orphaned запись: {e['name']} от {e['date']}")
+        except Exception as ex:
+            log.warning(f"close_orphaned_entries: ошибка для {e['name']} ({e.get('date')}): {ex}")
+    return closed
+
+
 def verify_journal_integrity():
     """Сверяет КАЖДУЮ закрытую запись Журнала: совпадает ли «Отработано» (G)
     с реальной разницей уход-приход. Чинит расхождения сама и возвращает
@@ -981,8 +1005,10 @@ def _clear_block(range_):
 
 def _rebuild_dashboard(dt):
     try:
-        # Блок 1: кто сейчас на работе
+        # Блок 1: кто сейчас на работе — только СЕГОДНЯШНИЕ открытые записи
         entries = get_open_entries_all()
+        today_str = dt.strftime("%d.%m.%Y")
+        entries = [e for e in entries if e.get("date") == today_str]
         live_rows = [[e["name"], e.get("location", ""), e["arrival"]] for e in entries] \
             if entries else [["Сейчас никто не на работе", "", ""]]
         _clear_block("A6:C21")

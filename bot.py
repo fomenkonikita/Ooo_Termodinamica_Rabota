@@ -734,11 +734,11 @@ def job_resync_green():
 
 
 def job_update_dashboard():
-    """Каждые 5 мин: синхронизирует переименования сотрудников по TG ID
-    (см. sync_employee_names), пересчитывает Итого-за-сегодня для всех
-    (см. resync_today_totals — страховка от тихих сбоев фоновой записи
-    после ухода), затем обновляет все код-зависимые блоки листа «Дашборд»."""
+    """Каждые 5 мин: закрывает orphaned записи прошлых дней (краш бота =
+    job_close_21 не сработал), синхронизирует переименования по TG ID,
+    пересчитывает Итого-за-сегодня, обновляет дашборд."""
     dt = now()
+    sheets.close_orphaned_entries(dt)
     sheets.sync_employee_names(dt)
     sheets.resync_today_totals(dt)
     sheets.update_dashboard(dt)
@@ -834,8 +834,20 @@ def job_reconcile():
     """00:10 — сверка вчерашнего дня: Журнал vs лист месяца (пропуски) +
     целостность каждой записи Журнала (Отработано vs реальная разница
     уход-приход, см. инцидент 30.06.2026)."""
-    yesterday = now() - timedelta(days=1)
+    current = now()
+    yesterday = current - timedelta(days=1)
     lines = []
+
+    # Закрываем записи из прошлых дней которые остались открытыми (краш бота)
+    try:
+        orphaned = sheets.close_orphaned_entries(current)
+    except Exception as ex:
+        log.warning(f"close_orphaned_entries error: {ex}")
+        orphaned = []
+    if orphaned:
+        lines.append("🔒 <b>Закрыты незакрытые записи прошлых дней:</b>")
+        for o in orphaned:
+            lines.append(f"  • {o['name']} ({o['date']})")
 
     try:
         fixed_gaps = sheets.reconcile_day(yesterday)
