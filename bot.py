@@ -755,19 +755,14 @@ def job_schedule_check():
 def job_resync_green():
     """Каждые 5 мин: один batchUpdate расставляет все цвета сегодняшнего столбца."""
     dt = now()
-    today_str = dt.strftime("%d.%m.%Y")
     try:
-        all_open  = sheets.get_open_entries_all()
-        open_today = [e for e in all_open if e.get("date") == today_str]
-        on_shift   = {e["name"] for e in open_today}
+        snap = sheets.read_today_snapshot(dt)
+        on_shift = {e["name"] for e in snap["open"] if e["date"] == snap["today_str"]}
         log.info(f"job_resync_green: на смене={list(on_shift)}")
-
-        closed = sheets.get_closed_entries_today(dt)
         white_names = [
-            e["name"] for e in closed
+            e["name"] for e in snap["closed_today"]
             if e["name"] not in on_shift and "авто" not in e.get("status", "")
         ]
-
         sheets.batch_month_colors(dt, green_names=list(on_shift), white_names=white_names)
         log.info(f"job_resync_green: зелёных={len(on_shift)}, белых={len(white_names)}")
     except Exception as ex:
@@ -780,8 +775,13 @@ def job_update_dashboard():
     пересчитывает Итого-за-сегодня, обновляет дашборд.
     Каждый шаг изолирован — сбой в одном не отменяет остальные."""
     dt = now()
+    snap = None
     try:
-        sheets.close_orphaned_entries(dt)
+        snap = sheets.read_today_snapshot(dt)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: read_today_snapshot: {ex}")
+    try:
+        sheets.close_orphaned_entries(dt, snapshot=snap)
     except Exception as ex:
         log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
     try:
@@ -789,11 +789,11 @@ def job_update_dashboard():
     except Exception as ex:
         log.warning(f"job_update_dashboard: sync_employee_names: {ex}")
     try:
-        sheets.resync_today_totals(dt)
+        sheets.resync_today_totals(dt, snapshot=snap)
     except Exception as ex:
         log.warning(f"job_update_dashboard: resync_today_totals: {ex}")
     try:
-        sheets.update_dashboard(dt)
+        sheets.update_dashboard(dt, snapshot=snap)
     except Exception as ex:
         log.warning(f"job_update_dashboard: update_dashboard: {ex}")
 

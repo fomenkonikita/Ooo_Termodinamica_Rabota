@@ -315,8 +315,10 @@ def log_notification(name, type_, planned_at, status, text, dt):
         log.warning(f"log_notification: не удалось залогировать для {name}: {ex}")
 
 
-def get_closed_entries_today(dt):
+def get_closed_entries_today(dt, snapshot=None):
     """Закрытые записи за сегодня с их статусом (для сброса застрявшего зелёного)."""
+    if snapshot is not None:
+        return [{"name": e["name"], "status": e["status"]} for e in snapshot["closed_today"]]
     date_str = dt.strftime("%d.%m.%Y")
     try:
         rows = _read("Журнал", "A2:I500")
@@ -327,6 +329,57 @@ def get_closed_entries_today(dt):
         for r in rows
         if len(r) >= 6 and _norm_date(r[0]) == date_str and r[1].strip() and r[5].strip()
     ]
+
+
+def read_today_snapshot(dt):
+    """Один read(Журнал) + один read(Сотрудники) → все данные для job-функций.
+    Передавать как snapshot= во все функции ниже, чтобы не перечитывать Журнал 5-6 раз за цикл."""
+    today_str = dt.strftime("%d.%m.%Y")
+    emp_rows = _read("Сотрудники", "A2:E200")
+    emp_map  = {row[1].strip(): row[0].strip() for row in emp_rows if len(row) >= 2}
+    active_names = [
+        row[1].strip() for row in emp_rows
+        if len(row) >= 5 and row[4].strip().lower() == "да" and row[1].strip()
+    ]
+    journal_rows = _read("Журнал", "A2:I500")
+    open_entries = []
+    closed_today = []
+    all_today    = []
+    for i, row in enumerate(journal_rows):
+        if not row or str(row[0]).strip().count('.') != 2:
+            continue
+        if len(row) < 2 or not row[1].strip():
+            continue
+        row_date = _norm_date(row[0])
+        name     = row[1].strip()
+        is_open  = not (len(row) >= 6 and str(row[5]).strip())
+        entry = {
+            "row":           i + 2,
+            "name":          name,
+            "date":          row_date,
+            "emp_type":      row[2].strip() if len(row) > 2 else "",
+            "location":      row[3].strip() if len(row) > 3 else "",
+            "arrival":       row[4].strip() if len(row) > 4 else "",
+            "departure":     row[5].strip() if len(row) > 5 else "",
+            "hours_str":     row[6].strip() if len(row) > 6 else "",
+            "status":        row[7].strip() if len(row) > 7 else "",
+            "last_activity": row[8].strip() if len(row) > 8 else "",
+            "telegram_id":   emp_map.get(name, ""),
+        }
+        if is_open:
+            open_entries.append(entry)
+        if row_date == today_str:
+            all_today.append(entry)
+            if not is_open:
+                closed_today.append(entry)
+    return {
+        "open":         open_entries,
+        "closed_today": closed_today,
+        "all_today":    all_today,
+        "today_str":    today_str,
+        "emp_map":      emp_map,
+        "active_names": active_names,
+    }
 
 
 def reconcile_month_colors(dt_month):
@@ -740,8 +793,10 @@ def record_waypoint(name, lat, lon, dt):
     ])
     update_last_activity(name, dt.strftime("%H:%M"))
 
-def get_open_entries_all():
+def get_open_entries_all(snapshot=None):
     """Все незакрытые записи с Telegram ID сотрудника."""
+    if snapshot is not None:
+        return snapshot["open"]
     emp_rows = _read("Сотрудники", "A2:E200")
     emp_map = {row[1].strip(): row[0].strip() for row in emp_rows if len(row) >= 2}
 
@@ -949,12 +1004,12 @@ def _ensure_monthly_sheet(sheet_name, year, month):
         log.warning(f"_ensure_monthly_sheet: предзаполнение сотрудников: {ex}")
 
 
-def close_orphaned_entries(current_dt):
+def close_orphaned_entries(current_dt, snapshot=None):
     """Закрывает открытые записи из ПРОШЛЫХ дней (job_close_21 не сработал из-за
     краша бота). Без этого сотрудник не может отметить приход — бот думает что
     он ещё на смене. Закрывает по логике job_close_21: min(приход+8ч, 21:00)."""
     today_str = current_dt.strftime("%d.%m.%Y")
-    entries = get_open_entries_all()
+    entries = get_open_entries_all(snapshot=snapshot)
     closed = []
     for e in entries:
         if e.get("date") == today_str:
@@ -1008,7 +1063,7 @@ def verify_journal_integrity():
     return fixed
 
 
-def resync_today_totals(dt):
+def resync_today_totals(dt, snapshot=None):
     """Самопочинка: пересчитывает Итого-за-день для ВСЕХ сотрудников с
     активностью сегодня, читая Журнал заново — и ВСЕГДА перезаписывает
     (в отличие от reconcile_day, который только дозаполняет пустое).
@@ -1023,9 +1078,12 @@ def resync_today_totals(dt):
         sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
         _ensure_monthly_sheet(sheet, dt.year, dt.month)
         _apply_monthly_header_style(sheet, dt.year, dt.month)  # синий заголовок + ширины
-        emp_rows = _read("Сотрудники", "A2:E200")
-        active_names = [r[1].strip() for r in emp_rows
-                        if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
+        if snapshot is not None:
+            active_names = snapshot["active_names"]
+        else:
+            emp_rows = _read("Сотрудники", "A2:E200")
+            active_names = [r[1].strip() for r in emp_rows
+                            if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
         month_rows = _read(sheet, "A2:A100")
         existing = {r[0].strip() for r in month_rows if r}
         for name in active_names:
@@ -1052,8 +1110,11 @@ def resync_today_totals(dt):
     # Пересчитать часы за сегодня — каждый сотрудник изолирован
     try:
         date_str = dt.strftime("%d.%m.%Y")
-        rows = _read("Журнал", "A2:I500")
-        names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and _norm_date(r[0]) == date_str}
+        if snapshot is not None:
+            names_today = {e["name"] for e in snapshot["all_today"]}
+        else:
+            rows = _read("Журнал", "A2:I500")
+            names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and _norm_date(r[0]) == date_str}
     except Exception as ex:
         log.warning(f"resync_today_totals: сбой чтения журнала: {ex}")
         return
@@ -1265,7 +1326,7 @@ _dashboard_dirty      = False
 _dashboard_dirty_lock = threading.Lock()
 
 
-def update_dashboard(dt):
+def update_dashboard(dt, snapshot=None):
     """Заполняет все код-зависимые блоки листа «Дашборд». Публичная точка
     входа — гарантирует, что событие, пришедшее ПОКА идёт пересборка, не
     потеряется молча (см. инцидент 30.06.2026: уход+приход почти подряд —
@@ -1282,7 +1343,7 @@ def update_dashboard(dt):
         while True:
             with _dashboard_dirty_lock:
                 _dashboard_dirty = False
-            _rebuild_dashboard(dt)
+            _rebuild_dashboard(dt, snapshot=snapshot)
             with _dashboard_dirty_lock:
                 if not _dashboard_dirty:
                     break
@@ -1302,12 +1363,12 @@ def _clear_block(range_):
         log.warning(f"_clear_block: не удалось очистить {range_}: {ex}")
 
 
-def _rebuild_dashboard(dt):
+def _rebuild_dashboard(dt, snapshot=None):
     today_str = dt.strftime("%d.%m.%Y")
 
     # Блок 1: кто сейчас на работе — только СЕГОДНЯШНИЕ открытые записи
     try:
-        entries = get_open_entries_all()
+        entries = get_open_entries_all(snapshot=snapshot)
         entries = [e for e in entries if e.get("date") == today_str]
         _type_labels = {"водитель": "Водитель 🚗", "сервис": "Сервис 🔧"}
         live_rows = [
@@ -1338,8 +1399,11 @@ def _rebuild_dashboard(dt):
 
     # Блок месячная сводка по сотрудникам
     try:
-        emp_rows = _read("Сотрудники", "A2:E200")
-        employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
+        if snapshot is not None:
+            employees = snapshot["active_names"]
+        else:
+            emp_rows = _read("Сотрудники", "A2:E200")
+            employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
 
         sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
         days_in_month = calendar.monthrange(dt.year, dt.month)[1]
