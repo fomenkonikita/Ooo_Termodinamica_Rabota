@@ -742,11 +742,18 @@ def job_schedule_check():
 def job_resync_green():
     """Каждые 5 мин: подсвечивает зелёным всех, кто сейчас на смене.
     Подстраховка от тихих сбоев _mark_monthly_present при самом приходе
-    (см. инцидент 30.06.2026 — Андрющенко был на смене, но без подсветки)."""
+    (см. инцидент 30.06.2026 — Андрющенко был на смене, но без подсветки).
+    Фильтрует только СЕГОДНЯШНИЕ открытые записи — иначе orphaned записи
+    прошлых дней красили бы текущий день. Также гарантирует что строка
+    в месячном листе существует перед покраской."""
     entries = sheets.get_open_entries_all()
     dt = now()
+    today_str = dt.strftime("%d.%m.%Y")
     for e in entries:
+        if e.get("date") != today_str:
+            continue
         try:
+            sheets._ensure_employee_row(e["name"], dt)
             sheets._mark_monthly_present(e["name"], dt)
         except Exception as ex:
             log.warning(f"job_resync_green: сбой для {e['name']}: {ex}")

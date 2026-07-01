@@ -766,6 +766,24 @@ def _ensure_monthly_sheet(sheet_name, year, month):
         body={"requests": requests}
     ))
 
+    # Предзаполнить всех активных сотрудников чтобы новый лист выглядел как предыдущие
+    try:
+        emp_rows = _read("Сотрудники", "A2:E200")
+        active_names = [r[1].strip() for r in emp_rows
+                        if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
+        last_day_col = _col(days_in_month)
+        total_col    = _col(days_in_month + 1)
+        rows_data = []
+        for i, name in enumerate(active_names):
+            row_num = i + 2
+            rows_data.append([name] + [""] * days_in_month +
+                             [f"=SUM(B{row_num}:{last_day_col}{row_num})"])
+        if rows_data:
+            _write(sheet_name, "A2", rows_data)
+    except Exception as ex:
+        log.warning(f"_ensure_monthly_sheet: предзаполнение сотрудников: {ex}")
+
+
 def close_orphaned_entries(current_dt):
     """Закрывает открытые записи из ПРОШЛЫХ дней (job_close_21 не сработал из-за
     краша бота). Без этого сотрудник не может отметить приход — бот думает что
@@ -832,15 +850,42 @@ def resync_today_totals(dt):
     Нужна, потому что update_monthly_on_departure уходит в фоновый поток
     (run_background) и при сетевом сбое может тихо не выполниться — без
     этой подстраховки месячный лист застревает на старой сумме (см.
-    инцидент 30.06.2026 — у Никиты 2 смены из 5 не попали в Итого)."""
+    инцидент 30.06.2026 — у Никиты 2 смены из 5 не попали в Итого).
+    Также гарантирует что ВСЕ активные сотрудники есть в текущем месячном
+    листе — даже если update_monthly_on_arrival упал в фоновом потоке."""
+    # Предзаполнить всех активных сотрудников — одно чтение двух листов
+    try:
+        sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+        _ensure_monthly_sheet(sheet, dt.year, dt.month)
+        emp_rows = _read("Сотрудники", "A2:E200")
+        active_names = [r[1].strip() for r in emp_rows
+                        if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
+        month_rows = _read(sheet, "A2:A100")
+        existing = {r[0].strip() for r in month_rows if r}
+        for name in active_names:
+            if name not in existing:
+                try:
+                    _ensure_employee_row(name, dt)
+                    existing.add(name)
+                    log.info(f"resync_today_totals: добавлена строка для {name} в {sheet}")
+                except Exception as ex:
+                    log.warning(f"resync_today_totals: создание строки {name}: {ex}")
+    except Exception as ex:
+        log.warning(f"resync_today_totals: предзаполнение сотрудников: {ex}")
+
+    # Пересчитать часы за сегодня — каждый сотрудник изолирован
     try:
         date_str = dt.strftime("%d.%m.%Y")
         rows = _read("Журнал", "A2:I3000")
         names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and r[0] == date_str}
-        for name in names_today:
-            _write_monthly(name, dt, 0)
     except Exception as ex:
-        log.warning(f"resync_today_totals: сбой: {ex}")
+        log.warning(f"resync_today_totals: сбой чтения журнала: {ex}")
+        return
+    for name in names_today:
+        try:
+            _write_monthly(name, dt, 0)
+        except Exception as ex:
+            log.warning(f"resync_today_totals: {name}: {ex}")
 
 
 def reconcile_day(dt):
