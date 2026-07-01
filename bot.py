@@ -932,7 +932,8 @@ def run_health_server():
 </body></html>""", 200
 
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+    log.info(f"Starting Flask on port {port}")
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False, threaded=True)
 
 
 def job_keepalive():
