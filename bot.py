@@ -753,47 +753,25 @@ def job_schedule_check():
 
 
 def job_resync_green():
-    """Каждые 5 мин: авторитетно расставляет цвета сегодняшнего столбца
-    по данным Журнала — источник правды, а не результат удачных фоновых потоков.
-    Открытая смена сегодня → ЗЕЛЁНЫЙ.
-    Закрытая вручную сегодня → БЕЛЫЙ/СЕРЫЙ (сброс застрявшего зелёного).
-    Orphaned прошлых дней — игнорируются (их закрывает close_orphaned_entries)."""
+    """Каждые 5 мин: один batchUpdate расставляет все цвета сегодняшнего столбца."""
     dt = now()
     today_str = dt.strftime("%d.%m.%Y")
-
-    # Кто сейчас на смене (только сегодняшние открытые)
-    all_open = sheets.get_open_entries_all()
-    open_today = [e for e in all_open if e.get("date") == today_str]
-    on_shift = {e["name"] for e in open_today}
-
-    log.info(f"job_resync_green: всего открытых={len(all_open)}, сегодня={len(open_today)}, "
-             f"на смене={list(on_shift)}, today_str={today_str}, "
-             f"даты в журнале={[e.get('date') for e in all_open]}")
-
-    for e in open_today:
-        try:
-            sheets._ensure_employee_row(e["name"], dt)
-            sheets._mark_monthly_present(e["name"], dt)
-            log.info(f"job_resync_green: зелёный установлен для {e['name']}")
-        except Exception as ex:
-            log.warning(f"job_resync_green: green {e['name']}: {ex}", exc_info=True)
-
-    # Кто ушёл сегодня — сбрасываем застрявший зелёный
     try:
-        closed = sheets.get_closed_entries_today(dt)
-    except Exception as ex:
-        log.warning(f"job_resync_green: get_closed: {ex}")
-        closed = []
+        all_open  = sheets.get_open_entries_all()
+        open_today = [e for e in all_open if e.get("date") == today_str]
+        on_shift   = {e["name"] for e in open_today}
+        log.info(f"job_resync_green: на смене={list(on_shift)}")
 
-    for e in closed:
-        if e["name"] in on_shift:
-            continue  # открыл новую смену — не трогаем
-        if "авто" in e.get("status", ""):
-            continue  # авто-закрытие красит _mark_monthly_auto, не трогаем
-        try:
-            sheets._reset_monthly_color(e["name"], dt)
-        except Exception as ex:
-            log.warning(f"job_resync_green: reset {e['name']}: {ex}")
+        closed = sheets.get_closed_entries_today(dt)
+        white_names = [
+            e["name"] for e in closed
+            if e["name"] not in on_shift and "авто" not in e.get("status", "")
+        ]
+
+        sheets.batch_month_colors(dt, green_names=list(on_shift), white_names=white_names)
+        log.info(f"job_resync_green: зелёных={len(on_shift)}, белых={len(white_names)}")
+    except Exception as ex:
+        log.warning(f"job_resync_green: {ex}", exc_info=True)
 
 
 def job_update_dashboard():

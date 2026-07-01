@@ -319,7 +319,7 @@ def get_closed_entries_today(dt):
     """Закрытые записи за сегодня с их статусом (для сброса застрявшего зелёного)."""
     date_str = dt.strftime("%d.%m.%Y")
     try:
-        rows = _read("Журнал", "A2:I3000")
+        rows = _read("Журнал", "A2:I500")
     except Exception:
         return []
     return [
@@ -337,7 +337,7 @@ def reconcile_month_colors(dt_month):
     try:
         month_rows = _read(sheet, "A2:A100")
         name_to_row = {r[0].strip(): i + 2 for i, r in enumerate(month_rows) if r}
-        journal_rows = _read("Журнал", "A2:I3000")
+        journal_rows = _read("Журнал", "A2:I500")
         sheet_id = _get_sheet_id(sheet)
     except Exception as ex:
         log.warning(f"reconcile_month_colors: {sheet}: {ex}")
@@ -518,7 +518,7 @@ def _mark_monthly_present(name, dt):
     rows  = _read(sheet, "A2:A100")
     for i, row in enumerate(rows):
         if row and row[0].strip() == name:
-            _set_cell_color(sheet, i + 2, dt.day, 0.7, 0.9, 0.7)  # зелёный
+            _set_cell_color(sheet, i + 2, dt.day, 0.7, 0.9, 0.7)
             return
 
 
@@ -530,10 +530,52 @@ def _reset_monthly_color(name, dt):
         if row and row[0].strip() == name:
             row_num = i + 2
             if date(dt.year, dt.month, dt.day).weekday() >= 5:
-                _set_cell_color(sheet, row_num, dt.day, 0.85, 0.85, 0.85)  # серый выходной
+                _set_cell_color(sheet, row_num, dt.day, 0.85, 0.85, 0.85)
             else:
-                _set_cell_color(sheet, row_num, dt.day, 1.0, 1.0, 1.0)  # белый
+                _set_cell_color(sheet, row_num, dt.day, 1.0, 1.0, 1.0)
             return
+
+
+def batch_month_colors(dt, green_names, white_names):
+    """Один batchUpdate для всех изменений цвета — вместо N отдельных вызовов.
+    Читает месячный лист один раз, делает один запрос к API."""
+    sheet    = f"{MONTHS_RU[dt.month]} {dt.year}"
+    sheet_id = _get_sheet_id(sheet)
+    if sheet_id is None:
+        return
+    rows     = _read(sheet, "A2:A100")
+    name_row = {row[0].strip(): i + 2 for i, row in enumerate(rows) if row}
+    col      = dt.day
+    is_weekend = date(dt.year, dt.month, dt.day).weekday() >= 5
+
+    requests = []
+    for name in green_names:
+        row_num = name_row.get(name)
+        if row_num is None:
+            continue
+        requests.append({"repeatCell": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
+                      "startColumnIndex": col, "endColumnIndex": col + 1},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.7, "green": 0.9, "blue": 0.7}}},
+            "fields": "userEnteredFormat.backgroundColor"
+        }})
+    for name in white_names:
+        row_num = name_row.get(name)
+        if row_num is None:
+            continue
+        r, g, b = (0.85, 0.85, 0.85) if is_weekend else (1.0, 1.0, 1.0)
+        requests.append({"repeatCell": {
+            "range": {"sheetId": sheet_id,
+                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
+                      "startColumnIndex": col, "endColumnIndex": col + 1},
+            "cell": {"userEnteredFormat": {"backgroundColor": {"red": r, "green": g, "blue": b}}},
+            "fields": "userEnteredFormat.backgroundColor"
+        }})
+    if requests:
+        _execute(_svc().spreadsheets().batchUpdate(
+            spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
+        ))
 
 
 def _ensure_employee_row(name, dt):
@@ -583,16 +625,15 @@ def update_monthly_on_departure(name, dt, hours_decimal):
 
 
 def resync_green_for(name, dt):
-    """Читает Журнал и авторитетно ставит цвет ячейки для одного сотрудника.
-    Единственная функция управляющая цветом — никакой гонки потоков."""
+    """Авторитетно ставит цвет для одного сотрудника через batch_month_colors."""
     today_str = dt.strftime("%d.%m.%Y")
     try:
-        all_open  = get_open_entries_all()
-        on_shift  = {e["name"] for e in all_open if e.get("date") == today_str}
+        all_open = get_open_entries_all()
+        on_shift = {e["name"] for e in all_open if e.get("date") == today_str}
         if name in on_shift:
-            _mark_monthly_present(name, dt)
+            batch_month_colors(dt, green_names=[name], white_names=[])
         else:
-            _reset_monthly_color(name, dt)
+            batch_month_colors(dt, green_names=[], white_names=[name])
     except Exception as ex:
         log.warning(f"resync_green_for {name}: {ex}", exc_info=True)
 
@@ -772,10 +813,10 @@ def _mark_monthly_auto(name, dt, hours_decimal):
 
     day_total_decimal = hours_decimal
     try:
-        journal_rows = _read("Журнал", "A2:I3000")
+        journal_rows = _read("Журнал", "A2:I500")
         total_min = 0
         for r in journal_rows:
-            if len(r) >= 7 and r[0].strip() == date_str and r[1].strip() == name and r[6].strip():
+            if len(r) >= 7 and _norm_date(r[0]) == date_str and r[1].strip() == name and r[6].strip():
                 h, m = r[6].strip().split(":")
                 total_min += int(h) * 60 + int(m)
         if total_min > 0:
@@ -1011,7 +1052,7 @@ def resync_today_totals(dt):
     # Пересчитать часы за сегодня — каждый сотрудник изолирован
     try:
         date_str = dt.strftime("%d.%m.%Y")
-        rows = _read("Журнал", "A2:I3000")
+        rows = _read("Журнал", "A2:I500")
         names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and _norm_date(r[0]) == date_str}
     except Exception as ex:
         log.warning(f"resync_today_totals: сбой чтения журнала: {ex}")
@@ -1083,10 +1124,10 @@ def _write_monthly(name, dt, hours_decimal):
 
     day_total_decimal = hours_decimal
     try:
-        journal_rows = _read("Журнал", "A2:I3000")
+        journal_rows = _read("Журнал", "A2:I500")
         total_min = 0
         for r in journal_rows:
-            if len(r) >= 7 and r[0].strip() == date_str and r[1].strip() == name and r[6].strip():
+            if len(r) >= 7 and _norm_date(r[0]) == date_str and r[1].strip() == name and r[6].strip():
                 h, m = r[6].strip().split(":")
                 total_min += int(h) * 60 + int(m)
         if total_min > 0:
@@ -1305,7 +1346,7 @@ def _rebuild_dashboard(dt):
         month_rows = _read(sheet, "A2:AH100")
         name_to_row = {r[0].strip(): r for r in month_rows if r}
 
-        journal_rows = _read("Журнал", "A2:I3000")
+        journal_rows = _read("Журнал", "A2:I500")
         month_prefix = f".{dt.month:02d}.{dt.year}"
 
         workdays_so_far = sum(
