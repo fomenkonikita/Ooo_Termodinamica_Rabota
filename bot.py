@@ -928,6 +928,18 @@ def job_keepalive():
         pass
 
 
+@bot.message_handler(commands=["дашборд", "dashboard"])
+def cmd_dashboard(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    msg = bot.reply_to(message, "🔄 Обновляю дашборд...")
+    try:
+        job_update_dashboard()
+        bot.edit_message_text("✅ Дашборд обновлён", message.chat.id, msg.message_id)
+    except Exception as ex:
+        bot.edit_message_text(f"⚠️ Ошибка: {ex}", message.chat.id, msg.message_id)
+
+
 @bot.message_handler(commands=["restart"])
 def cmd_restart(message):
     if message.from_user.id not in ADMIN_IDS:
@@ -956,5 +968,9 @@ if __name__ == "__main__":
     scheduler.add_job(job_reconcile,     "cron",     hour=0,  minute=10)  # 00:10 сверка прошедшего дня
     scheduler.add_job(job_keepalive,     "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
     scheduler.start()
+
+    # Обновляем дашборд сразу при старте, не ждём 5 мин до первого тика
+    threading.Thread(target=job_update_dashboard, daemon=True).start()
+
     log.info("Attendance bot started (scheduler active)")
     bot.infinity_polling(timeout=30, long_polling_timeout=20)
