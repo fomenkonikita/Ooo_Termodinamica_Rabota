@@ -885,6 +885,16 @@ def run_health_server():
             return f"STALE: no successful Google API call in {int(stale_for)}s", 503
         return "OK", 200
 
+    @app.route("/_restart")
+    def force_restart():
+        """Быстрый перезапуск процесса — Render поднимает новый за ~3 сек."""
+        import threading as _threading
+        def _do_exit():
+            _time.sleep(0.5)
+            os._exit(0)
+        _threading.Thread(target=_do_exit, daemon=True).start()
+        return "Restarting...", 200
+
     @app.route("/privacy")
     def privacy():
         return """<!DOCTYPE html>
@@ -908,6 +918,29 @@ def run_health_server():
     app.run(host="0.0.0.0", port=port)
 
 
+def job_keepalive():
+    """Пингует себя чтобы Render не усыплял сервис через 15 мин бездействия."""
+    import requests as _req
+    url = os.environ.get("RENDER_EXTERNAL_URL", "https://attendance-bot-sdjc.onrender.com")
+    try:
+        _req.get(url + "/", timeout=10)
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=["restart"])
+def cmd_restart(message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    bot.reply_to(message, "♻️ Перезапускаю бота...")
+    import threading as _t
+    import time as _time2
+    def _do():
+        _time2.sleep(1)
+        os._exit(0)
+    _t.Thread(target=_do, daemon=True).start()
+
+
 if __name__ == "__main__":
     import threading
     threading.Thread(target=run_health_server, daemon=True).start()
@@ -921,6 +954,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_remind_2350,   "cron",     hour=23, minute=50)  # 23:50 напоминание продлившим
     scheduler.add_job(job_hard_close,    "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие
     scheduler.add_job(job_reconcile,     "cron",     hour=0,  minute=10)  # 00:10 сверка прошедшего дня
+    scheduler.add_job(job_keepalive,     "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
     scheduler.start()
     log.info("Attendance bot started (scheduler active)")
     bot.infinity_polling(timeout=30, long_polling_timeout=20)
