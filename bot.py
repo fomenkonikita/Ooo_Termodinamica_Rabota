@@ -856,20 +856,20 @@ def job_reconcile():
         run_background(sheets.update_dashboard, now())
 
 
-WATCHDOG_TIMEOUT_SEC = 600  # 10 минут без единого успешного запроса к Google = считаем зависшим
+WATCHDOG_TIMEOUT_SEC = 1800  # 30 минут без успешного API вызова = зависший
 
 
 def run_watchdog():
-    """Сторож: если 10 минут подряд НИ ОДИН запрос к Google API не прошёл
-    успешно (см. sheets.last_successful_api_call), бот сам себя завершает —
-    Render тут же поднимает новый процесс. Без этого зависание могло длиться
-    45+ минут, пока Render сам не заметит (инцидент 30.06.2026)."""
+    """Сторож: если 30 минут подряд НИ ОДИН запрос к Google API не прошёл
+    успешно, бот сам себя завершает — Render поднимает новый процесс.
+    Таймаут 30 мин (не 10) чтобы rolling deploy успел пройти health check."""
     import time as _time
+    _time.sleep(120)  # дать время на старт и первый API вызов
     while True:
         _time.sleep(60)
         stale_for = _time.time() - sheets.last_successful_api_call
         if stale_for > WATCHDOG_TIMEOUT_SEC:
-            log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — принудительный перезапуск процесса")
+            log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — перезапуск")
             os._exit(1)
 
 
@@ -880,10 +880,16 @@ def run_health_server():
 
     @app.route("/")
     def health():
+        # Возвращаем 200 пока процесс жив — Render не должен убивать бота
+        # из-за временных проблем с Google API. /status — для диагностики.
+        return "OK", 200
+
+    @app.route("/status")
+    def api_status():
         stale_for = _time.time() - sheets.last_successful_api_call
         if stale_for > WATCHDOG_TIMEOUT_SEC:
-            return f"STALE: no successful Google API call in {int(stale_for)}s", 503
-        return "OK", 200
+            return f"STALE: no Google API call in {int(stale_for)}s", 503
+        return f"OK: last API call {int(stale_for)}s ago", 200
 
     @app.route("/_restart")
     def force_restart():
