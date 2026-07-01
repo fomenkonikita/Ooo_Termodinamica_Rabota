@@ -959,9 +959,22 @@ def cmd_restart(message):
     _t.Thread(target=_do, daemon=True).start()
 
 
+def _run_polling():
+    """Запускает polling в отдельном thread с авто-рестартом при ошибках.
+    Flask (main thread) остаётся живым всегда — health check не падает
+    если polling временно недоступен."""
+    import time as _t
+    while True:
+        try:
+            log.info("Polling started")
+            bot.infinity_polling(timeout=30, long_polling_timeout=20)
+        except Exception as ex:
+            log.error(f"infinity_polling crashed: {ex} — restart in 5s")
+            _t.sleep(5)
+
+
 if __name__ == "__main__":
     import threading
-    threading.Thread(target=run_health_server, daemon=True).start()
     threading.Thread(target=run_watchdog, daemon=True).start()
 
     scheduler = BackgroundScheduler()
@@ -975,8 +988,11 @@ if __name__ == "__main__":
     scheduler.add_job(job_keepalive,     "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
     scheduler.start()
 
+    # Polling в daemon thread — Flask остаётся на main thread
+    threading.Thread(target=_run_polling, daemon=True).start()
+
     # Обновляем дашборд сразу при старте, не ждём 5 мин до первого тика
     threading.Thread(target=job_update_dashboard, daemon=True).start()
 
     log.info("Attendance bot started (scheduler active)")
-    bot.infinity_polling(timeout=30, long_polling_timeout=20)
+    run_health_server()  # Flask на main thread — процесс жив пока Flask жив
