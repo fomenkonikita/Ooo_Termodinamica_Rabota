@@ -276,6 +276,9 @@ def find_open_entry(name):
     # Журнал: A=Дата B=Имя C=Тип D=Объект E=Приход F=Уход G=Отработано H=Статус I=Посл.активность
     rows = _read("Журнал", "A2:I2000")
     for i, row in enumerate(rows):
+        # Пропускаем строки где A не похоже на дату (TG ID и другой мусор)
+        if str(row[0]).strip().count('.') != 2:
+            continue
         if len(row) >= 5 and row[1].strip() == name:
             if len(row) < 6 or not str(row[5]).strip():
                 return {
@@ -691,6 +694,9 @@ def get_open_entries_all():
     rows = _read("Журнал", "A2:I2000")
     result = []
     for i, row in enumerate(rows):
+        # Пропускаем строки где A не похоже на дату (TG ID и другой мусор)
+        if str(row[0]).strip().count('.') != 2:
+            continue
         if len(row) >= 5 and row[1].strip():
             if len(row) < 6 or not str(row[5]).strip():
                 name = row[1].strip()
