@@ -44,9 +44,9 @@ def _execute(request, max_retries=3):
                 time.sleep(wait)
     raise last_exc
 
-CLIENT_ID      = os.environ["GOOGLE_CLIENT_ID"]
-CLIENT_SECRET  = os.environ["GOOGLE_CLIENT_SECRET"]
-REFRESH_TOKEN  = os.environ["GOOGLE_DRIVE_REFRESH_TOKEN"]
+CLIENT_ID      = os.environ.get("GOOGLE_CLIENT_ID", "")
+CLIENT_SECRET  = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+REFRESH_TOKEN  = os.environ.get("GOOGLE_DRIVE_REFRESH_TOKEN", "")
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "1DZ_XQPAGbSn5aCKVqcBBRQ-X4sAItx23v-qJEw1dYbo")
 
 MONTHS_RU = ["","Январь","Февраль","Март","Апрель","Май","Июнь",

@@ -4,20 +4,31 @@ import threading
 from math import radians, cos, sin, asin, sqrt
 from datetime import datetime, timedelta
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
 # Убираем системный прокси
 for _k in ("ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
     os.environ.pop(_k, None)
 
+log.info("Importing telebot...")
 import telebot
 from telebot import types
 from apscheduler.schedulers.background import BackgroundScheduler
 
-import sheets
+log.info("Importing sheets...")
+try:
+    import sheets
+    log.info("sheets imported OK")
+except Exception as _e:
+    log.critical(f"FAILED to import sheets: {_e}", exc_info=True)
+    raise
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
-
-BOT_TOKEN = os.environ["BOT_TOKEN"]
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    log.critical("BOT_TOKEN env var not set!")
+    raise RuntimeError("BOT_TOKEN is required")
+log.info(f"BOT_TOKEN present: {BOT_TOKEN[:8]}...")
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET", 5))
 ADMIN_IDS = {224397927, 1988448060}  # Никита Фоменко, Александр Лоцманов
 
