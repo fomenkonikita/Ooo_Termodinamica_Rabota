@@ -127,12 +127,14 @@ def _write(sheet, range_, values):
         body={"values": values}
     ))
 
+_sheet_id_cache: dict = {}
+
 def _get_sheet_id(title):
-    meta = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
-    for s in meta["sheets"]:
-        if s["properties"]["title"] == title:
-            return s["properties"]["sheetId"]
-    return None
+    if title not in _sheet_id_cache:
+        meta = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+        for s in meta["sheets"]:
+            _sheet_id_cache[s["properties"]["title"]] = s["properties"]["sheetId"]
+    return _sheet_id_cache.get(title)
 
 def _set_cell_color(sheet_title, row_num, col_index, r, g, b):
     sheet_id = _get_sheet_id(sheet_title)
@@ -502,14 +504,12 @@ def record_arrival(name, emp_type, location, dt, telegram_id=""):
 
 
 def update_monthly_on_arrival(name, dt):
-    """Создаёт/подсвечивает строку в месячном листе. Можно (и нужно) вызывать
-    асинхронно после record_arrival — не блокирует ответ пользователю."""
+    """Создаёт строку в месячном листе если её нет. Цвет ставит resync_green_for."""
     try:
         _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
         _ensure_employee_row(name, dt)
-        _mark_monthly_present(name, dt)
     except Exception as ex:
-        log.warning(f"update_monthly_on_arrival: не удалось обновить месячный лист для {name}: {ex}")
+        log.warning(f"update_monthly_on_arrival: {name}: {ex}")
 
 
 def _mark_monthly_present(name, dt):
@@ -575,13 +575,26 @@ def record_departure(name, dt, open_entry):
 
 
 def update_monthly_on_departure(name, dt, hours_decimal):
-    """Пишет часы и сбрасывает цвет в месячном листе. Вызывать после record_departure,
-    обычно асинхронно — не блокирует ответ пользователю."""
+    """Пишет накопленные часы за день. Цвет сбрасывает resync_green_for."""
     try:
         _write_monthly(name, dt, hours_decimal)
-        _reset_monthly_color(name, dt)
     except Exception as ex:
-        log.warning(f"update_monthly_on_departure: не удалось обновить месячный лист для {name}: {ex}")
+        log.warning(f"update_monthly_on_departure: {name}: {ex}")
+
+
+def resync_green_for(name, dt):
+    """Читает Журнал и авторитетно ставит цвет ячейки для одного сотрудника.
+    Единственная функция управляющая цветом — никакой гонки потоков."""
+    today_str = dt.strftime("%d.%m.%Y")
+    try:
+        all_open  = get_open_entries_all()
+        on_shift  = {e["name"] for e in all_open if e.get("date") == today_str}
+        if name in on_shift:
+            _mark_monthly_present(name, dt)
+        else:
+            _reset_monthly_color(name, dt)
+    except Exception as ex:
+        log.warning(f"resync_green_for {name}: {ex}", exc_info=True)
 
 def update_last_activity(name, time_str):
     """Обновляет время последней активности (колонка I) в открытой записи Журнала."""

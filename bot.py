@@ -507,6 +507,7 @@ def btn_shift_end(message):
         f"🏁 Смена завершена!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>",
         reply_markup=main_kb(emp["type"], is_admin=(message.from_user.id in ADMIN_IDS)))
     run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
+    run_background(sheets.resync_green_for, emp["name"], dt)
     run_background(sheets.update_employee_location, message.from_user.id, "")
     run_background(sheets.update_dashboard, dt)
 
@@ -603,6 +604,7 @@ def handle_location(message):
             f"{icon} {'Приход' if emp['type'] == 'объект' else 'Смена начата'}!\n{loc_line}🕒 {dt.strftime('%H:%M')}{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
         run_background(sheets.update_monthly_on_arrival, emp["name"], dt)
+        run_background(sheets.resync_green_for, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, loc_name)
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         run_background(sheets.update_dashboard, dt)
@@ -632,6 +634,7 @@ def handle_location(message):
             f"🚪 Уход записан!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
         run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
+        run_background(sheets.resync_green_for, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, "")
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
         run_background(sheets.update_dashboard, dt)
