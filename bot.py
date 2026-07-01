@@ -781,7 +781,13 @@ def job_update_dashboard():
     except Exception as ex:
         log.warning(f"job_update_dashboard: read_today_snapshot: {ex}")
     try:
-        sheets.close_orphaned_entries(dt, snapshot=snap)
+        closed = sheets.close_orphaned_entries(dt, snapshot=snap)
+        if closed:
+            # Снапшот устарел — записи закрыты, читаем заново
+            try:
+                snap = sheets.read_today_snapshot(dt)
+            except Exception:
+                snap = None
     except Exception as ex:
         log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
     try:

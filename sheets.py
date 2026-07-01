@@ -1430,7 +1430,7 @@ def _rebuild_dashboard(dt, snapshot=None):
     # Блок GPS-аномалии (последние 20, новые сверху)
     try:
         try:
-            gps_rows = _read("GPS лог", "A2:I5000")
+            gps_rows = _read("GPS лог", "A2:I500")
         except Exception:
             gps_rows = []
         anomalies = [r for r in gps_rows if len(r) >= 9 and str(r[8]).strip()]
@@ -1549,5 +1549,13 @@ def setup_spreadsheet():
                 body={"requests": requests},
             ))
             log.info("setup_spreadsheet: batchUpdate выполнен")
+
+        # Применить единый стиль к текущему и прошлому месяцу
+        # (Июнь создан до добавления freeze/Итого-стиля, нужно перекрасить)
+        tz_offset = int(os.environ.get("TZ_OFFSET", 5))
+        now_local = datetime.utcnow() + timedelta(hours=tz_offset)
+        for _dt in [now_local, now_local.replace(day=1) - timedelta(days=1)]:
+            _header_styled_months.discard(f"{MONTHS_RU[_dt.month]} {_dt.year}")
+            _apply_monthly_header_style(f"{MONTHS_RU[_dt.month]} {_dt.year}", _dt.year, _dt.month)
     except Exception as ex:
         log.warning(f"setup_spreadsheet: {ex}")
