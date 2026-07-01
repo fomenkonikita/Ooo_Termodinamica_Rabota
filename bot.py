@@ -1060,6 +1060,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_reconcile,        "cron",     hour=0,  minute=10)  # 00:10 сверка прошедшего дня
     scheduler.add_job(job_keepalive,        "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
     scheduler.start()
+    run_background(sheets.setup_spreadsheet)  # однократная настройка таблицы
 
     log.info("Attendance bot started (scheduler active)")
     bot.infinity_polling(timeout=30, long_polling_timeout=20)  # polling на main thread — оригинальная архитектура

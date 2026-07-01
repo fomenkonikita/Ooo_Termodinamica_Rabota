@@ -1005,24 +1005,44 @@ def _ensure_monthly_sheet(sheet_name, year, month):
 
 
 def close_orphaned_entries(current_dt, snapshot=None):
-    """Закрывает открытые записи из ПРОШЛЫХ дней (job_close_21 не сработал из-за
-    краша бота). Без этого сотрудник не может отметить приход — бот думает что
-    он ещё на смене. Закрывает по логике job_close_21: min(приход+8ч, 21:00)."""
+    """Закрывает открытые записи:
+    1. Прошлых дней — job_close_21 не сработал из-за краша/рестарта бота.
+    2. Сегодняшние после 21:00 — бот перезапустился после 21:00 и cron пропустил.
+    Пропускает записи со статусом «продлено» — их закроет job_hard_close в 23:55.
+    После закрытия чистит локацию в Сотрудниках."""
     today_str = current_dt.strftime("%d.%m.%Y")
+    past_21 = current_dt.hour >= 21
     entries = get_open_entries_all(snapshot=snapshot)
     closed = []
     for e in entries:
-        if e.get("date") == today_str:
+        is_past_day = e.get("date") != today_str
+        is_overdue_today = (e.get("date") == today_str and past_21)
+        if not is_past_day and not is_overdue_today:
+            continue
+        # Продлённые до 23:55 не трогаем — job_hard_close закроет их сам
+        if "продлено" in str(e.get("status", "")).lower():
             continue
         try:
             entry_date = datetime.strptime(e["date"], "%d.%m.%Y")
             arr = datetime.strptime(e["arrival"], "%H:%M")
-            close_by_hours = entry_date.replace(hour=arr.hour, minute=arr.minute) + timedelta(hours=8)
-            close_at_21 = entry_date.replace(hour=21, minute=0, second=0, microsecond=0)
-            close_dt = min(close_by_hours, close_at_21)
+            if is_past_day:
+                close_by_hours = entry_date.replace(hour=arr.hour, minute=arr.minute) + timedelta(hours=8)
+                close_at_21 = entry_date.replace(hour=21, minute=0, second=0, microsecond=0)
+                close_dt = min(close_by_hours, close_at_21)
+            else:
+                # Сегодня после 21:00 — закрываем как job_close_21
+                close_at_21 = current_dt.replace(hour=21, minute=0, second=0, microsecond=0)
+                close_by_hours = current_dt.replace(hour=arr.hour, minute=arr.minute, second=0, microsecond=0) + timedelta(hours=8)
+                close_dt = min(close_at_21, close_by_hours)
             auto_close_entry(e["row"], e["name"], e["arrival"], close_dt)
+            tg_id = e.get("telegram_id", "")
+            if tg_id:
+                try:
+                    update_employee_location(tg_id, "")
+                except Exception:
+                    pass
             closed.append({"name": e["name"], "date": e["date"]})
-            log.info(f"Закрыта orphaned запись: {e['name']} от {e['date']}")
+            log.info(f"Закрыта {'прошлого дня' if is_past_day else 'сегодня после 21'} запись: {e['name']} от {e['date']}")
         except Exception as ex:
             log.warning(f"close_orphaned_entries: ошибка для {e['name']} ({e.get('date')}): {ex}")
     return closed
@@ -1196,6 +1216,9 @@ def _write_monthly(name, dt, hours_decimal):
     except Exception as ex:
         log.warning(f"_write_monthly: не удалось пересчитать сумму за день для {name}, пишу только последнюю смену: {ex}")
 
+    if day_total_decimal == 0:
+        return  # не писать 0 — не затираем существующие данные
+
     _ensure_monthly_sheet(sheet, dt.year, dt.month)
     rows = _read(sheet, "A2:A100")
     row_num = None
@@ -1269,6 +1292,28 @@ def _apply_monthly_header_style(sheet_name, year, month):
                               "startIndex": 1, "endIndex": days_in_month + 2},
                     "properties": {"pixelSize": 36},
                     "fields": "pixelSize",
+                }},
+                # Freeze: первая строка + первая колонка (Июнь создан до этого кода)
+                {"updateSheetProperties": {
+                    "properties": {
+                        "sheetId": sheet_id,
+                        "gridProperties": {"frozenRowCount": 1, "frozenColumnCount": 1},
+                    },
+                    "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount",
+                }},
+                # Итого колонка: жирный + голубой фон
+                {"repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1, "endRowIndex": 100,
+                        "startColumnIndex": days_in_month + 1,
+                        "endColumnIndex": days_in_month + 2,
+                    },
+                    "cell": {"userEnteredFormat": {
+                        "textFormat": {"bold": True},
+                        "backgroundColor": {"red": 0.85, "green": 0.9, "blue": 1.0},
+                    }},
+                    "fields": "userEnteredFormat.textFormat.bold,userEnteredFormat.backgroundColor",
                 }},
             ]}
         ))
@@ -1441,15 +1486,19 @@ def _rebuild_dashboard(dt, snapshot=None):
     try:
         plan = get_today_notification_plan(dt)
         if plan:
-            notif_rows = [
-                [
-                    p["actual_time"] or p["planned_at"].strftime("%H:%M"),
-                    p["name"], p["type"],
-                    p["planned_at"].strftime("%H:%M"),
-                    p["status"],
-                ]
-                for p in plan
-            ]
+            notif_rows = []
+            for p in plan:
+                try:
+                    notif_rows.append([
+                        p.get("actual_time") or p["planned_at"].strftime("%H:%M"),
+                        p["name"], p["type"],
+                        p["planned_at"].strftime("%H:%M"),
+                        p.get("status", "?"),
+                    ])
+                except Exception as ex:
+                    log.warning(f"_rebuild_dashboard: ошибка строки уведомления: {ex}")
+            if not notif_rows:
+                notif_rows = [["—", "—", "—", "—", "уведомлений сегодня нет"]]
         else:
             # Нет плановых уведомлений (расписание не задано), но могут быть фактические
             sent = get_today_notifications(dt)
@@ -1461,3 +1510,44 @@ def _rebuild_dashboard(dt, snapshot=None):
         _write("Дашборд", "A82", notif_rows)
     except Exception as ex:
         log.warning(f"_rebuild_dashboard block_notif (реестр): {ex}")
+
+
+def setup_spreadsheet():
+    """Однократная настройка таблицы при старте бота:
+    — заголовки строки 1 в Журнале
+    — скрытие колонок I и J (служебные: Активность, TG ID)
+    — удаление row groups с листа Дашборд (кнопки «+» появлялись от старого кода)
+    """
+    try:
+        current = _read("Журнал", "A1:J1")
+        if not current or not current[0] or current[0][0] != "Дата":
+            _write("Журнал", "A1:J1", [["Дата", "Имя", "Тип", "Объект", "Приход",
+                                         "Уход", "Отработано", "Статус", "Активность", "TG ID"]])
+            log.info("setup_spreadsheet: заголовки Журнала записаны")
+
+        journal_id   = _get_sheet_id("Журнал")
+        dashboard_id = _get_sheet_id("Дашборд")
+        requests = []
+
+        if journal_id is not None:
+            requests.append({"updateDimensionProperties": {
+                "range": {"sheetId": journal_id, "dimension": "COLUMNS",
+                          "startIndex": 8, "endIndex": 10},
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
+            }})
+
+        if dashboard_id is not None:
+            requests.append({"deleteDimensionGroup": {
+                "range": {"sheetId": dashboard_id, "dimension": "ROWS",
+                          "startIndex": 0, "endIndex": 1000},
+            }})
+
+        if requests:
+            _execute(_svc().spreadsheets().batchUpdate(
+                spreadsheetId=SPREADSHEET_ID,
+                body={"requests": requests},
+            ))
+            log.info("setup_spreadsheet: batchUpdate выполнен")
+    except Exception as ex:
+        log.warning(f"setup_spreadsheet: {ex}")
