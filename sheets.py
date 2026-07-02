@@ -199,6 +199,44 @@ def update_employee_location(telegram_id, location):
     except Exception as ex:
         log.warning(f"update_employee_location: сбой для {telegram_id}: {ex}")
 
+
+def reconcile_employee_locations(dt, snapshot=None):
+    """Самопочинка: Сотрудники!D (текущая локация) пишется фоновым потоком
+    (run_background) при каждом приходе/уходе — без повтора при сбое. Если
+    поток прервался (сетевой сбой, рестарт/OOM процесса до завершения записи —
+    см. инцидент 02.07.2026), локация застревает неверной: либо пустая у
+    реально пришедшего, либо вчерашняя у реально ушедшего. Сверяет каждого
+    активного сотрудника с открытыми записями Журнала за сегодня и правит
+    расхождение — пишет, только если значение реально отличается."""
+    try:
+        emp_rows = _read("Сотрудники", "A2:D200")
+    except Exception as ex:
+        log.warning(f"reconcile_employee_locations: чтение Сотрудники: {ex}")
+        return []
+
+    if snapshot is not None:
+        today_str = snapshot["today_str"]
+        open_today = [e for e in snapshot["open"] if e["date"] == today_str]
+    else:
+        open_today = [e for e in get_open_entries_all() if e["date"] == dt.strftime("%d.%m.%Y")]
+    expected_by_id = {e["telegram_id"]: e.get("location", "") for e in open_today if e.get("telegram_id")}
+
+    fixed = []
+    for i, row in enumerate(emp_rows):
+        if not row or not str(row[0]).strip():
+            continue
+        tg_id = str(row[0]).strip()
+        current = row[3].strip() if len(row) > 3 else ""
+        expected = expected_by_id.get(tg_id, "")
+        if current != expected:
+            try:
+                _write("Сотрудники", f"D{i + 2}", [[expected]])
+                fixed.append({"telegram_id": tg_id, "was": current, "now": expected})
+            except Exception as ex:
+                log.warning(f"reconcile_employee_locations: запись для {tg_id}: {ex}")
+    return fixed
+
+
 _DAYS_MAP = {"пн": 0, "вт": 1, "ср": 2, "чт": 3, "пт": 4, "сб": 5, "вс": 6}
 
 def parse_work_days(days_str):

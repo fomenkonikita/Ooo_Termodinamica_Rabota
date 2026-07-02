@@ -750,7 +750,9 @@ def job_schedule_check():
 
 def job_update_dashboard():
     """Каждые 5 мин: закрывает orphaned записи прошлых дней (краш бота =
-    job_close_21 не сработал), синхронизирует переименования по TG ID.
+    job_close_21 не сработал), сверяет Сотрудники!Локация с открытыми
+    записями Журнала (самопочинка после сбоя фонового update_employee_location,
+    инцидент 02.07.2026), синхронизирует переименования по TG ID.
     Дашборд/цвета/часы больше не пересчитываются кодом — это живые формулы
     и условное форматирование прямо в таблице (миграция 02.07.2026).
     Каждый шаг изолирован — сбой в одном не отменяет остальные."""
@@ -764,6 +766,10 @@ def job_update_dashboard():
         sheets.close_orphaned_entries(dt, snapshot=snap)
     except Exception as ex:
         log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
+    try:
+        sheets.reconcile_employee_locations(dt, snapshot=snap)
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: reconcile_employee_locations: {ex}")
     try:
         sheets.sync_employee_names(dt)
     except Exception as ex:
