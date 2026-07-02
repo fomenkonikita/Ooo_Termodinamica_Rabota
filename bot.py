@@ -933,11 +933,22 @@ def _memory_report(top_n=15):
     return "\n".join(lines)
 
 
+MEM_RESTART_THRESHOLD_MB = 430  # запас ~80МБ до жёсткого лимита Render (512Mi)
+
+
 def run_watchdog():
     """Сторож: если 30 минут подряд НИ ОДИН запрос к Google API не прошёл
     успешно, бот сам себя завершает — Render поднимает новый процесс.
     Таймаут 30 мин (не 10) чтобы rolling deploy успел пройти health check.
-    Заодно каждую минуту логирует память — диагностика OOM (02.07.2026)."""
+    Заодно каждую минуту логирует память — диагностика OOM (02.07.2026).
+
+    ВАЖНО: 02.07.2026 нашли и починили утечку в кэшировании googleapiclient
+    (~2.3МБ на вызов), но RSS всё равно продолжает расти (215→404МБ за 9 мин),
+    при этом tracemalloc видит только ~80МБ из этого роста — то есть основная
+    утечка происходит в НАТИВНОЙ памяти (C/SSL/сокеты), её не поймать
+    средствами Python. Настоящая причина не найдена. Пока — контролируемый
+    самоперезапуск ДО достижения жёсткого лимита: лучше плановый рестарт за
+    секунду, чем непредсказуемый SIGKILL от OOM-killer посреди записи в Sheets."""
     import time as _time
     _time.sleep(120)  # дать время на старт и первый API вызов
     while True:
@@ -947,6 +958,9 @@ def run_watchdog():
             log.info(f"MEM: RSS={rss:.1f}МБ")
             if rss > 350:  # приближаемся к лимиту 512МБ — берём полный снимок
                 log.warning(f"MEM: высокое потребление, снимок tracemalloc:\n{_memory_report()}")
+            if rss > MEM_RESTART_THRESHOLD_MB:
+                log.error(f"MEM: RSS={rss:.1f}МБ > {MEM_RESTART_THRESHOLD_MB}МБ — плановый самоперезапуск до OOM")
+                os._exit(0)
         stale_for = _time.time() - sheets.last_successful_api_call
         if stale_for > WATCHDOG_TIMEOUT_SEC:
             log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — перезапуск")
