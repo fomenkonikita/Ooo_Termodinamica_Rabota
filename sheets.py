@@ -100,6 +100,31 @@ def _svc():
         _service = build("sheets", "v4", http=authed_http, static_discovery=True)
     return _service
 
+
+_spreadsheets_res = None
+_values_res = None
+
+
+def _ss():
+    """Кэшированный .spreadsheets() — пересоздание на каждый вызов течёт
+    памятью: googleapiclient динамически перегенерирует схему/docstring для
+    КАЖДОГО нового Resource-объекта (~2.3МБ за вызов, не освобождается —
+    подтверждено tracemalloc 02.07.2026: 15 одинаковых чтений без кэша = 34МБ,
+    с кэшем = 0.01МБ). Настоящая причина сегодняшних OOM, не конкретная джоба."""
+    global _spreadsheets_res
+    if _spreadsheets_res is None:
+        _spreadsheets_res = _svc().spreadsheets()
+    return _spreadsheets_res
+
+
+def _values():
+    """Кэшированный .spreadsheets().values() — см. _ss()."""
+    global _values_res
+    if _values_res is None:
+        _values_res = _ss().values()
+    return _values_res
+
+
 def _col(n):
     """0-indexed column number → letter(s). 0=A, 1=B, 26=AA ..."""
     result = ""
@@ -122,14 +147,14 @@ def _norm_date(s):
     return str(s).strip()
 
 def _read(sheet, range_):
-    res = _execute(_svc().spreadsheets().values().get(
+    res = _execute(_values().get(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!{range_}"
     ))
     return res.get("values", [])
 
 def _append(sheet, values):
-    _execute(_svc().spreadsheets().values().append(
+    _execute(_values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A1",
         valueInputOption="USER_ENTERED",
@@ -137,7 +162,7 @@ def _append(sheet, values):
     ))
 
 def _write(sheet, range_, values):
-    _execute(_svc().spreadsheets().values().update(
+    _execute(_values().update(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!{range_}",
         valueInputOption="USER_ENTERED",
@@ -148,7 +173,7 @@ _sheet_id_cache: dict = {}
 
 def _get_sheet_id(title):
     if title not in _sheet_id_cache:
-        meta = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+        meta = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
         for s in meta["sheets"]:
             _sheet_id_cache[s["properties"]["title"]] = s["properties"]["sheetId"]
     return _sheet_id_cache.get(title)
@@ -324,11 +349,11 @@ def find_open_entry(name):
     return None
 
 def _ensure_notifications_sheet():
-    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+    meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"] for s in meta["sheets"]}
     if "Уведомления" in existing:
         return
-    _execute(_svc().spreadsheets().batchUpdate(
+    _execute(_ss().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": "Уведомления"}}}]}
     ))
@@ -553,7 +578,7 @@ def _ensure_employee_row(name, dt):
 
     day_formulas = [
         f'=IFERROR(SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
-        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}))*24;0)'
+        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}));0)'
         for day in range(1, days_in_month + 1)
     ]
     helper_formulas = [
@@ -577,7 +602,7 @@ def _ensure_employee_row(name, dt):
     try:
         sheet_id = _get_sheet_id(sheet)
         if sheet_id is not None:
-            _execute(_svc().spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
+            _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
                 "updateSheetProperties": {
                     "properties": {"sheetId": sheet_id,
                                    "gridProperties": {"columnCount": helper_start_col + days_in_month + 5}},
@@ -596,15 +621,28 @@ def _ensure_employee_row(name, dt):
     _append(sheet, row_values)
     try:
         if sheet_id is not None:
-            _execute(_svc().spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
-                "updateDimensionProperties": {
-                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                              "startIndex": helper_start_col, "endIndex": helper_start_col + days_in_month},
-                    "properties": {"hiddenByUser": True}, "fields": "hiddenByUser",
-                }
-            }]}))
+            _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [
+                {
+                    "updateDimensionProperties": {
+                        "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                                  "startIndex": helper_start_col, "endIndex": helper_start_col + days_in_month},
+                        "properties": {"hiddenByUser": True}, "fields": "hiddenByUser",
+                    }
+                },
+                {
+                    # [ч]:мм — те же формулы теперь хранят долю суток, не десятичные
+                    # часы (иначе 5.6 показалось бы как ~134ч при этом формате)
+                    "repeatCell": {
+                        "range": {"sheetId": sheet_id,
+                                  "startRowIndex": row_num - 1, "endRowIndex": row_num,
+                                  "startColumnIndex": 1, "endColumnIndex": days_in_month + 2},
+                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "TIME", "pattern": "[h]:mm"}}},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+            ]}))
     except Exception as ex:
-        log.warning(f"_ensure_employee_row: скрыть хелпер-колонки: {ex}")
+        log.warning(f"_ensure_employee_row: скрыть хелпер-колонки/формат: {ex}")
 
 
 def record_departure(name, dt, open_entry):
@@ -644,11 +682,11 @@ def reopen_entry(row_num, name, dt):
     _write("Журнал", f"F{row_num}:I{row_num}", [["", "", "⏳ продлено до 23:55", ""]])
 
 def _ensure_gps_log_sheet():
-    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+    meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"] for s in meta["sheets"]}
     if "GPS лог" in existing:
         return
-    _execute(_svc().spreadsheets().batchUpdate(
+    _execute(_ss().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": "GPS лог"}}}]}
     ))
@@ -775,13 +813,13 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     """Создаёт месячный лист с заголовком и серыми выходными если его нет."""
     if sheet_name in _known_sheets:
         return
-    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+    meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
     existing = {s["properties"]["title"]: s["properties"]["sheetId"] for s in meta["sheets"]}
     _known_sheets.update(existing.keys())
     if sheet_name in existing:
         return
 
-    _execute(_svc().spreadsheets().batchUpdate(
+    _execute(_ss().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": [{"addSheet": {"properties": {"title": sheet_name}}}]}
     ))
@@ -792,7 +830,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     _write(sheet_name, "A1", [header])
 
     # Форматирование: выходные серые, заголовок жирный, freeze строка+колонка
-    meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
+    meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
     sheet_id = next(s["properties"]["sheetId"] for s in meta["sheets"]
                     if s["properties"]["title"] == sheet_name)
     requests = [
@@ -850,7 +888,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
                     "fields": "userEnteredFormat.backgroundColor",
                 }
             })
-    _execute(_svc().spreadsheets().batchUpdate(
+    _execute(_ss().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": requests}
     ))
@@ -938,7 +976,7 @@ def _apply_monthly_header_style(sheet_name, year, month):
         sheet_id = _get_sheet_id(sheet_name)
         if sheet_id is None:
             return
-        _execute(_svc().spreadsheets().batchUpdate(
+        _execute(_ss().batchUpdate(
             spreadsheetId=SPREADSHEET_ID,
             body={"requests": [
                 # Синий заголовок
@@ -1072,7 +1110,7 @@ def setup_spreadsheet():
             }})
 
         if requests:
-            _execute(_svc().spreadsheets().batchUpdate(
+            _execute(_ss().batchUpdate(
                 spreadsheetId=SPREADSHEET_ID,
                 body={"requests": requests},
             ))
