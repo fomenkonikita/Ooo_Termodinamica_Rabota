@@ -93,7 +93,11 @@ def _svc():
         # бросает исключение. См. инцидент 30.06.2026: бот завис на 45+ минут
         # без единой строчки в логах. 30с — явный таймаут вместо зависания.
         authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
-        _service = build("sheets", "v4", http=authed_http)
+        # static_discovery=True — использует discovery-документ из самой библиотеки
+        # вместо скачивания+динамического парсинга с сети при каждом старте.
+        # Экономит ~160МБ на процесс (найдено 02.07.2026 через tracemalloc при
+        # диагностике OOM: googleapiclient/discovery.py давал 127+33МБ без этого).
+        _service = build("sheets", "v4", http=authed_http, static_discovery=True)
     return _service
 
 def _col(n):

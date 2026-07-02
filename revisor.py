@@ -79,7 +79,7 @@ def _svc():
         )
         creds.refresh(Request())
         authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
-        _svc_instance = build("sheets", "v4", http=authed_http)
+        _svc_instance = build("sheets", "v4", http=authed_http, static_discovery=True)
     return _svc_instance
 
 
