@@ -533,6 +533,28 @@ def handle_location(message):
         bot.send_message(message.chat.id, "❌ Вы не зарегистрированы. Напишите /start")
         return
 
+    # Пересланное сообщение (в т.ч. из «Избранного») несёт СТАРУЮ геолокацию,
+    # но выглядит как обычное location-сообщение. forward_date заполняется
+    # Telegram у ЛЮБОЙ пересылки и никогда не бывает у живого нажатия кнопки
+    # «Поделиться геолокацией» — надёжный признак подмены отметки.
+    if message.forward_date:
+        forwarded_from = message.forward_from_chat or message.forward_sender_name or message.forward_from or "?"
+        log.warning(f"Отклонена пересланная геолокация: {emp['name']} ({uid}), источник={forwarded_from}")
+        bot.send_message(message.chat.id,
+            "❌ Это пересланное сообщение с геолокацией, а не отметка прямо сейчас.\n"
+            "Нажмите кнопку и поделитесь геолокацией заново.",
+            reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+        alert = (f"🚫 <b>Попытка отметки пересланной геолокацией</b>\n"
+                 f"Сотрудник: {emp['name']}\nВремя: {now().strftime('%H:%M')}\n"
+                 f"Источник пересылки: {forwarded_from}")
+        for admin_id in ADMIN_IDS:
+            try:
+                bot.send_message(admin_id, alert)
+            except Exception as ex:
+                log.warning(f"Forwarded-location alert failed: {ex}")
+        _state.pop(uid, None)
+        return
+
     state    = _state.pop(uid, {})
     step     = state.get("step", "")
     data     = state.get("data", {})
