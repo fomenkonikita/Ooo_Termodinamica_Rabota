@@ -149,29 +149,6 @@ def _get_sheet_id(title):
             _sheet_id_cache[s["properties"]["title"]] = s["properties"]["sheetId"]
     return _sheet_id_cache.get(title)
 
-def _set_cell_color(sheet_title, row_num, col_index, r, g, b):
-    sheet_id = _get_sheet_id(sheet_title)
-    if sheet_id is None:
-        return
-    _execute(_svc().spreadsheets().batchUpdate(
-        spreadsheetId=SPREADSHEET_ID,
-        body={"requests": [{
-            "repeatCell": {
-                "range": {
-                    "sheetId":          sheet_id,
-                    "startRowIndex":    row_num - 1,
-                    "endRowIndex":      row_num,
-                    "startColumnIndex": col_index,
-                    "endColumnIndex":   col_index + 1,
-                },
-                "cell": {"userEnteredFormat": {
-                    "backgroundColor": {"red": r, "green": g, "blue": b}
-                }},
-                "fields": "userEnteredFormat.backgroundColor",
-            }
-        }]}
-    ))
-
 
 # ── Публичный API ──────────────────────────────────────────────────────────────
 
@@ -395,65 +372,6 @@ def read_today_snapshot(dt):
     }
 
 
-def reconcile_month_colors(dt_month):
-    """Расставляет правильные цвета в месячном листе по данным Журнала:
-    закрытые вручную → белый/серый, авто-закрытые → красный.
-    Чинит 'застрявшие' зелёные ячейки от предыдущих месяцев."""
-    sheet = f"{MONTHS_RU[dt_month.month]} {dt_month.year}"
-    try:
-        month_rows = _read(sheet, "A2:A100")
-        name_to_row = {r[0].strip(): i + 2 for i, r in enumerate(month_rows) if r}
-        journal_rows = _read("Журнал", "A2:I500")
-        sheet_id = _get_sheet_id(sheet)
-    except Exception as ex:
-        log.warning(f"reconcile_month_colors: {sheet}: {ex}")
-        return
-    if sheet_id is None:
-        return
-
-    month_prefix = f".{dt_month.month:02d}.{dt_month.year}"
-    requests = []
-    for row in journal_rows:
-        if len(row) < 6 or not row[5].strip():
-            continue  # нет ухода — пропускаем
-        date_str = row[0].strip()
-        if not date_str.endswith(month_prefix):
-            continue
-        name = row[1].strip()
-        status = row[7].strip() if len(row) >= 8 else ""
-        row_num = name_to_row.get(name)
-        if row_num is None:
-            continue
-        try:
-            day = int(date_str.split(".")[0])
-        except Exception:
-            continue
-        is_auto = "авто" in status
-        is_weekend = date(dt_month.year, dt_month.month, day).weekday() >= 5
-        if is_auto:
-            r, g, b = 1.0, 0.4, 0.4   # красный (авто-закрытие)
-        elif is_weekend:
-            r, g, b = 0.85, 0.85, 0.85  # серый (выходной)
-        else:
-            r, g, b = 1.0, 1.0, 1.0   # белый (обычный)
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id,
-                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                      "startColumnIndex": day, "endColumnIndex": day + 1},
-            "cell": {"userEnteredFormat": {
-                "backgroundColor": {"red": r, "green": g, "blue": b}
-            }},
-            "fields": "userEnteredFormat.backgroundColor",
-        }})
-    if requests:
-        try:
-            _execute(_svc().spreadsheets().batchUpdate(
-                spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
-            ))
-            log.info(f"reconcile_month_colors: сброшено {len(requests)} ячеек в {sheet}")
-        except Exception as ex:
-            log.warning(f"reconcile_month_colors: batchUpdate: {ex}")
-
 
 def get_today_notifications(dt):
     """Реестр уведомлений за сегодня — для админ-кнопки."""
@@ -570,7 +488,8 @@ def record_arrival(name, emp_type, location, dt, telegram_id=""):
 
 
 def update_monthly_on_arrival(name, dt):
-    """Создаёт строку в месячном листе если её нет. Цвет ставит resync_green_for."""
+    """Создаёт строку в месячном листе если её нет (для новых сотрудников).
+    Часы и цвет — живые формулы/условное форматирование, ничего не пишут сюда."""
     try:
         _ensure_monthly_sheet(f"{MONTHS_RU[dt.month]} {dt.year}", dt.year, dt.month)
         _ensure_employee_row(name, dt)
@@ -578,88 +497,72 @@ def update_monthly_on_arrival(name, dt):
         log.warning(f"update_monthly_on_arrival: {name}: {ex}")
 
 
-def _mark_monthly_present(name, dt):
-    """Подсвечивает зелёным день в месячном листе — сотрудник сейчас на смене."""
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    rows  = _read(sheet, "A2:A100")
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            _set_cell_color(sheet, i + 2, dt.day, 0.7, 0.9, 0.7)
-            return
-
-
-def _reset_monthly_color(name, dt):
-    """Возвращает обычный цвет ячейки (серый для выходных, белый для будней)."""
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    rows  = _read(sheet, "A2:A100")
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            row_num = i + 2
-            if date(dt.year, dt.month, dt.day).weekday() >= 5:
-                _set_cell_color(sheet, row_num, dt.day, 0.85, 0.85, 0.85)
-            else:
-                _set_cell_color(sheet, row_num, dt.day, 1.0, 1.0, 1.0)
-            return
-
-
-def batch_month_colors(dt, green_names, white_names):
-    """Один batchUpdate для всех изменений цвета — вместо N отдельных вызовов.
-    Читает месячный лист один раз, делает один запрос к API."""
-    sheet    = f"{MONTHS_RU[dt.month]} {dt.year}"
-    sheet_id = _get_sheet_id(sheet)
-    if sheet_id is None:
-        return
-    rows     = _read(sheet, "A2:A100")
-    name_row = {row[0].strip(): i + 2 for i, row in enumerate(rows) if row}
-    col      = dt.day
-    is_weekend = date(dt.year, dt.month, dt.day).weekday() >= 5
-
-    requests = []
-    for name in green_names:
-        row_num = name_row.get(name)
-        if row_num is None:
-            continue
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id,
-                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                      "startColumnIndex": col, "endColumnIndex": col + 1},
-            "cell": {"userEnteredFormat": {"backgroundColor": {"red": 0.7, "green": 0.9, "blue": 0.7}}},
-            "fields": "userEnteredFormat.backgroundColor"
-        }})
-    for name in white_names:
-        row_num = name_row.get(name)
-        if row_num is None:
-            continue
-        r, g, b = (0.85, 0.85, 0.85) if is_weekend else (1.0, 1.0, 1.0)
-        requests.append({"repeatCell": {
-            "range": {"sheetId": sheet_id,
-                      "startRowIndex": row_num - 1, "endRowIndex": row_num,
-                      "startColumnIndex": col, "endColumnIndex": col + 1},
-            "cell": {"userEnteredFormat": {"backgroundColor": {"red": r, "green": g, "blue": b}}},
-            "fields": "userEnteredFormat.backgroundColor"
-        }})
-    if requests:
-        _execute(_svc().spreadsheets().batchUpdate(
-            spreadsheetId=SPREADSHEET_ID, body={"requests": requests}
-        ))
-
-
 def _ensure_employee_row(name, dt):
-    """Создаёт строку сотрудника в месячном листе если её нет."""
+    """Создаёт строку сотрудника в месячном листе если её нет — сразу с живыми
+    формулами часов (SUMIFS от Журнала) и хелпер-ячейками для условного
+    форматирования (миграция 02.07.2026), а не пустыми ячейками."""
     sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
     rows  = _read(sheet, "A2:A100")
     for row in rows:
         if row and row[0].strip() == name:
             return  # уже есть
     days_in_month = calendar.monthrange(dt.year, dt.month)[1]
-    _append(sheet, [name] + [""] * days_in_month + [""])
+    year, month = dt.year, dt.month
+
+    day_formulas = [
+        f'=IFERROR(SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
+        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}))*24;0)'
+        for day in range(1, days_in_month + 1)
+    ]
+    helper_formulas = [
+        f'=IF(AND(DATE({year};{month};{day})=TODAY();'
+        f'COUNTIFS(Журнал!$A$2:$A$500;DATE({year};{month};{day});'
+        f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$F$2:$F$500;"")>0);"open";'
+        f'IF(COUNTIFS(Журнал!$A$2:$A$500;DATE({year};{month};{day});'
+        f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$H$2:$H$500;"⚠️ авто")>0;"auto";""))'
+        for day in range(1, days_in_month + 1)
+    ]
+
     # Строка добавилась сразу за последней непустой — индекс уже знаем,
     # повторное чтение не нужно (было узким местом на новых сотрудниках)
-    row_num      = len(rows) + 2
+    row_num = len(rows) + 2
     last_day_col = _col(days_in_month)
     total_col    = _col(days_in_month + 1)
-    _write(sheet, f"{total_col}{row_num}",
-           [[f"=SUM(B{row_num}:{last_day_col}{row_num})"]])
+    helper_start_col = days_in_month + 2  # индекс сразу после Итого (0-based: A=0)
+    helper_start_letter = _col(helper_start_col + 1)
+    helper_end_letter   = _col(helper_start_col + days_in_month)
+
+    try:
+        sheet_id = _get_sheet_id(sheet)
+        if sheet_id is not None:
+            _execute(_svc().spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
+                "updateSheetProperties": {
+                    "properties": {"sheetId": sheet_id,
+                                   "gridProperties": {"columnCount": helper_start_col + days_in_month + 5}},
+                    "fields": "gridProperties.columnCount",
+                }
+            }]}))
+    except Exception as ex:
+        log.warning(f"_ensure_employee_row: расширить сетку листа: {ex}")
+
+    row_values = (
+        [name]
+        + [f.format(row=row_num) for f in day_formulas]
+        + [f"=SUM(B{row_num}:{last_day_col}{row_num})"]
+        + [f.format(row=row_num) for f in helper_formulas]
+    )
+    _append(sheet, row_values)
+    try:
+        if sheet_id is not None:
+            _execute(_svc().spreadsheets().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
+                "updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                              "startIndex": helper_start_col, "endIndex": helper_start_col + days_in_month},
+                    "properties": {"hiddenByUser": True}, "fields": "hiddenByUser",
+                }
+            }]}))
+    except Exception as ex:
+        log.warning(f"_ensure_employee_row: скрыть хелпер-колонки: {ex}")
 
 
 def record_departure(name, dt, open_entry):
@@ -682,27 +585,6 @@ def record_departure(name, dt, open_entry):
     return hours_str, hours_decimal
 
 
-def update_monthly_on_departure(name, dt, hours_decimal):
-    """Пишет накопленные часы за день. Цвет сбрасывает resync_green_for."""
-    try:
-        _write_monthly(name, dt, hours_decimal)
-    except Exception as ex:
-        log.warning(f"update_monthly_on_departure: {name}: {ex}")
-
-
-def resync_green_for(name, dt):
-    """Авторитетно ставит цвет для одного сотрудника через batch_month_colors."""
-    today_str = dt.strftime("%d.%m.%Y")
-    try:
-        all_open = get_open_entries_all()
-        on_shift = {e["name"] for e in all_open if e.get("date") == today_str}
-        if name in on_shift:
-            batch_month_colors(dt, green_names=[name], white_names=[])
-        else:
-            batch_month_colors(dt, green_names=[], white_names=[name])
-    except Exception as ex:
-        log.warning(f"resync_green_for {name}: {ex}", exc_info=True)
-
 def update_last_activity(name, time_str):
     """Обновляет время последней активности (колонка I) в открытой записи Журнала."""
     rows = _read("Журнал", "A2:I500")
@@ -714,37 +596,10 @@ def update_last_activity(name, time_str):
                 return
 
 def reopen_entry(row_num, name, dt):
-    """Снимает авто-закрытие: очищает Уход/Отработано/Статус и ячейку в месячном листе."""
+    """Снимает авто-закрытие: очищает Уход/Отработано/Статус в Журнале.
+    Часы и цвет дня в месячном листе — живые формулы, сами пересчитаются
+    от того что запись в Журнале снова открыта (миграция 02.07.2026)."""
     _write("Журнал", f"F{row_num}:I{row_num}", [["", "", "⏳ продлено до 23:55", ""]])
-    # Берём дату прихода из журнала чтобы очистить правильную ячейку в месячном листе
-    entry = get_entry_by_row(row_num)
-    if entry and entry.get("date"):
-        try:
-            entry_dt = datetime.strptime(entry["date"], "%d.%m.%Y")
-        except Exception:
-            entry_dt = dt
-    else:
-        entry_dt = dt
-    _clear_monthly_auto(name, entry_dt)
-    _mark_monthly_present(name, entry_dt)
-
-def _clear_monthly_auto(name, dt):
-    """Очищает 'авто' и сбрасывает цвет ячейки в месячном листе."""
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    day   = dt.day
-
-    rows = _read(sheet, "A2:A100")
-    row_num = None
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            row_num = i + 2
-            break
-    if not row_num:
-        return
-
-    col = _col(day)
-    _write(sheet, f"{col}{row_num}", [[""]])
-    _set_cell_color(sheet, row_num, day, 1.0, 1.0, 1.0)  # белый
 
 def _ensure_gps_log_sheet():
     meta     = _execute(_svc().spreadsheets().get(spreadsheetId=SPREADSHEET_ID))
@@ -854,7 +709,9 @@ def get_extended_entries():
 
 
 def auto_close_entry(row_num, name, arrival_str, close_dt):
-    """Закрывает запись автоматически, помечает ⚠️ и красит ячейку в месячном листе."""
+    """Закрывает запись автоматически, помечает ⚠️ авто в Журнале.
+    Часы и красный цвет дня в месячном листе — живые формулы/условное
+    форматирование, сами подхватят статус "⚠️ авто" (миграция 02.07.2026)."""
     departure_str = close_dt.strftime("%H:%M")
     try:
         arr = datetime.strptime(arrival_str, "%H:%M")
@@ -863,55 +720,12 @@ def auto_close_entry(row_num, name, arrival_str, close_dt):
             dep += timedelta(days=1)
         total_min     = int((dep - arr).total_seconds() // 60)
         hours_str     = f"{total_min // 60}:{total_min % 60:02d}"
-        hours_decimal = round(total_min / 60, 2)
     except Exception:
-        hours_str, hours_decimal = "0:00", 0.0
+        hours_str = "0:00"
 
     _write("Журнал", f"F{row_num}:I{row_num}", [
         [departure_str, hours_str, "⚠️ авто", ""]
     ])
-    _mark_monthly_auto(name, close_dt, hours_decimal)
-
-def _mark_monthly_auto(name, dt, hours_decimal):
-    """См. _write_monthly — та же логика: пишем СУММУ всех закрытых смен
-    этого дня, не только последнюю (авто-закрытую)."""
-    sheet    = f"{MONTHS_RU[dt.month]} {dt.year}"
-    day      = dt.day
-    date_str = dt.strftime("%d.%m.%Y")
-
-    day_total_decimal = hours_decimal
-    try:
-        journal_rows = _read("Журнал", "A2:I500")
-        total_min = 0
-        for r in journal_rows:
-            if len(r) >= 7 and _norm_date(r[0]) == date_str and r[1].strip() == name and r[6].strip():
-                h, m = r[6].strip().split(":")
-                total_min += int(h) * 60 + int(m)
-        if total_min > 0:
-            day_total_decimal = round(total_min / 60, 2)
-    except Exception as ex:
-        log.warning(f"_mark_monthly_auto: не удалось пересчитать сумму за день для {name}: {ex}")
-
-    _ensure_monthly_sheet(sheet, dt.year, dt.month)
-    rows = _read(sheet, "A2:A100")
-    row_num = None
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            row_num = i + 2
-            break
-    if row_num is None:
-        _ensure_employee_row(name, dt)
-        rows = _read(sheet, "A2:A100")
-        for i, row in enumerate(rows):
-            if row and row[0].strip() == name:
-                row_num = i + 2
-                break
-    if not row_num:
-        return
-
-    col = _col(day)
-    _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
-    _set_cell_color(sheet, row_num, day, 1.0, 0.4, 0.4)  # красный
 
 _known_sheets = set()  # кэш существующих листов — не дёргать метаданные на каждый чих
 
@@ -1061,204 +875,6 @@ def close_orphaned_entries(current_dt, snapshot=None):
     return closed
 
 
-def verify_journal_integrity():
-    """Сверяет КАЖДУЮ закрытую запись Журнала: совпадает ли «Отработано» (G)
-    с реальной разницей уход-приход. Чинит расхождения сама и возвращает
-    список исправленного — неважно, откуда взялась ошибка (баг, ручная
-    правка), эта проверка ловит её саму по себе (см. инцидент 30.06.2026 —
-    запись с 0:00 вместо 2:00, причину которой не удалось установить
-    из-за пересозданной git-истории)."""
-    fixed = []
-    try:
-        rows = _read("Журнал", "A2:J500")
-        for i, row in enumerate(rows):
-            if len(row) < 7 or not row[4].strip() or not row[5].strip():
-                continue
-            arrival_str, departure_str, stored = row[4].strip(), row[5].strip(), row[6].strip()
-            try:
-                arr = datetime.strptime(arrival_str, "%H:%M")
-                dep = datetime.strptime(departure_str, "%H:%M")
-                if dep < arr:
-                    dep += timedelta(days=1)
-                total_min = int((dep - arr).total_seconds() // 60)
-                real_str  = f"{total_min // 60}:{total_min % 60:02d}"
-            except Exception:
-                continue
-            if stored != real_str:
-                row_num = i + 2
-                _write("Журнал", f"G{row_num}", [[real_str]])
-                fixed.append({
-                    "name": row[1].strip(), "date": row[0].strip(),
-                    "was": stored, "now": real_str,
-                })
-    except Exception as ex:
-        log.warning(f"verify_journal_integrity: сбой: {ex}")
-    return fixed
-
-
-def resync_today_totals(dt, snapshot=None):
-    """Самопочинка: пересчитывает Итого-за-день для ВСЕХ сотрудников с
-    активностью сегодня, читая Журнал заново — и ВСЕГДА перезаписывает
-    (в отличие от reconcile_day, который только дозаполняет пустое).
-    Нужна, потому что update_monthly_on_departure уходит в фоновый поток
-    (run_background) и при сетевом сбое может тихо не выполниться — без
-    этой подстраховки месячный лист застревает на старой сумме (см.
-    инцидент 30.06.2026 — у Никиты 2 смены из 5 не попали в Итого).
-    Также гарантирует что ВСЕ активные сотрудники есть в текущем месячном
-    листе — даже если update_monthly_on_arrival упал в фоновом потоке."""
-    # Предзаполнить всех активных сотрудников — одно чтение двух листов
-    try:
-        sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-        _ensure_monthly_sheet(sheet, dt.year, dt.month)
-        _apply_monthly_header_style(sheet, dt.year, dt.month)  # синий заголовок + ширины
-        if snapshot is not None:
-            active_names = snapshot["active_names"]
-        else:
-            emp_rows = _read("Сотрудники", "A2:E200")
-            active_names = [r[1].strip() for r in emp_rows
-                            if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
-        month_rows = _read(sheet, "A2:A100")
-        existing = {r[0].strip() for r in month_rows if r}
-        for name in active_names:
-            if name not in existing:
-                try:
-                    _ensure_employee_row(name, dt)
-                    existing.add(name)
-                    log.info(f"resync_today_totals: добавлена строка для {name} в {sheet}")
-                except Exception as ex:
-                    log.warning(f"resync_today_totals: создание строки {name}: {ex}")
-    except Exception as ex:
-        log.warning(f"resync_today_totals: предзаполнение сотрудников: {ex}")
-
-    # Сбросить застрявшие цвета предыдущего месяца — каждый цикл в первую неделю.
-    # Намеренно БЕЗ кэша: если close_orphaned_entries упал в прошлом цикле и записи
-    # ещё не были закрыты, следующий цикл должен повторить попытку, а не пропустить.
-    if dt.day <= 7:
-        try:
-            prev = (dt.replace(day=1) - timedelta(days=1))
-            reconcile_month_colors(prev)
-        except Exception as ex:
-            log.warning(f"resync_today_totals: prev month colors: {ex}")
-
-    # Пересчитать часы за сегодня — каждый сотрудник изолирован
-    try:
-        date_str = dt.strftime("%d.%m.%Y")
-        if snapshot is not None:
-            names_today = {e["name"] for e in snapshot["all_today"]}
-        else:
-            rows = _read("Журнал", "A2:I500")
-            names_today = {r[1].strip() for r in rows if r and len(r) >= 2 and _norm_date(r[0]) == date_str}
-    except Exception as ex:
-        log.warning(f"resync_today_totals: сбой чтения журнала: {ex}")
-        return
-    for name in names_today:
-        try:
-            _write_monthly(name, dt, 0)
-        except Exception as ex:
-            log.warning(f"resync_today_totals: {name}: {ex}")
-
-
-def reconcile_day(dt):
-    """Сверяет Журнал и месячный лист за указанный день, дозаполняет пропуски.
-    Возвращает список исправленных записей [{name, date, hours}]."""
-    date_str = dt.strftime("%d.%m.%Y")
-    rows = _read("Журнал", "A2:I500")
-    totals = {}
-    for row in rows:
-        if len(row) < 7 or _norm_date(row[0]) != date_str:
-            continue
-        name      = row[1].strip()
-        hours_str = str(row[6]).strip()
-        try:
-            h, m = hours_str.split(":")
-            hours_decimal = round(int(h) + int(m) / 60, 2)
-        except Exception:
-            continue
-        if hours_decimal <= 0:
-            continue
-        totals[name] = totals.get(name, 0) + hours_decimal
-
-    fixed = []
-    if not totals:
-        return fixed
-
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    _ensure_monthly_sheet(sheet, dt.year, dt.month)
-    sheet_rows  = _read(sheet, "A2:AH100")
-    name_to_row = {row[0].strip(): i + 2 for i, row in enumerate(sheet_rows) if row}
-
-    for name, total in totals.items():
-        row_num = name_to_row.get(name)
-        if row_num is None:
-            _ensure_employee_row(name, dt)
-            sheet_rows  = _read(sheet, "A2:AH100")
-            name_to_row = {row[0].strip(): i + 2 for i, row in enumerate(sheet_rows) if row}
-            row_num = name_to_row.get(name)
-        if row_num is None:
-            continue
-        row         = sheet_rows[row_num - 2] if row_num - 2 < len(sheet_rows) else []
-        current_val = row[dt.day] if len(row) > dt.day else ""
-        current_str = str(current_val).strip()
-        try:
-            current_decimal = float(current_str.replace(",", ".")) if current_str else 0.0
-        except ValueError:
-            current_decimal = None  # нечисловое значение — не трогаем (может быть формула/пометка)
-        if current_decimal is not None and abs(current_decimal - total) > 0.01:
-            col = _col(dt.day)
-            _write(sheet, f"{col}{row_num}", [[total]])
-            fixed.append({"name": name, "date": date_str, "hours": total, "was": current_decimal})
-    return fixed
-
-
-def _write_monthly(name, dt, hours_decimal):
-    """Пишет ИТОГ часов за день — не просто последнюю смену, а сумму ВСЕХ
-    закрытых смен этого сотрудника в этот день из Журнала. Раньше писалась
-    только последняя смена, перезаписывая предыдущие — если за день было
-    несколько заходов/выходов (обед, повторный приход), реальные часы
-    занижались (см. инцидент 30.06.2026: 3 смены за день, в табеле
-    оставалась только вторая, 0:15, вместо суммы ~3,75ч)."""
-    sheet     = f"{MONTHS_RU[dt.month]} {dt.year}"
-    day       = dt.day
-    date_str  = dt.strftime("%d.%m.%Y")
-
-    day_total_decimal = hours_decimal
-    try:
-        journal_rows = _read("Журнал", "A2:I500")
-        total_min = 0
-        for r in journal_rows:
-            if len(r) >= 7 and _norm_date(r[0]) == date_str and r[1].strip() == name and r[6].strip():
-                h, m = r[6].strip().split(":")
-                total_min += int(h) * 60 + int(m)
-        if total_min > 0:
-            day_total_decimal = round(total_min / 60, 2)
-    except Exception as ex:
-        log.warning(f"_write_monthly: не удалось пересчитать сумму за день для {name}, пишу только последнюю смену: {ex}")
-
-    if day_total_decimal == 0:
-        return  # не писать 0 — не затираем существующие данные
-
-    _ensure_monthly_sheet(sheet, dt.year, dt.month)
-    rows = _read(sheet, "A2:A100")
-    row_num = None
-    for i, row in enumerate(rows):
-        if row and row[0].strip() == name:
-            row_num = i + 2
-            break
-
-    if row_num is None:
-        # Строки нет — создаём (на случай если водитель или авто-закрытие без record_arrival)
-        _ensure_employee_row(name, dt)
-        rows = _read(sheet, "A2:A100")
-        for i, row in enumerate(rows):
-            if row and row[0].strip() == name:
-                row_num = i + 2
-                break
-
-    if row_num:
-        col = _col(day)
-        _write(sheet, f"{col}{row_num}", [[day_total_decimal]])
-
-
 _header_styled_months: set = set()    # кэш: не перекрашивать заголовок дважды
 
 
@@ -1341,9 +957,6 @@ def _apply_monthly_header_style(sheet_name, year, month):
         log.warning(f"_apply_monthly_header_style: {sheet_name}: {ex}")
 
 
-_dashboard_lock = threading.Lock()
-
-
 def sync_employee_names(dt):
     """Самопочинка: если сотрудника переименовали в листе Сотрудники (имя там
     не привязано жёстко ни к чему), его прошлые записи в Журнале и в листе
@@ -1383,151 +996,6 @@ def sync_employee_names(dt):
                     break
     except Exception as ex:
         log.warning(f"sync_employee_names: сбой: {ex}")
-
-
-_dashboard_dirty      = False
-_dashboard_dirty_lock = threading.Lock()
-
-
-def update_dashboard(dt, snapshot=None):
-    """Заполняет все код-зависимые блоки листа «Дашборд». Публичная точка
-    входа — гарантирует, что событие, пришедшее ПОКА идёт пересборка, не
-    потеряется молча (см. инцидент 30.06.2026: уход+приход почти подряд —
-    второй вызов раньше просто пропускался, дашборд застревал на старых
-    данных до следующего таймера). Если пересборка уже идёт — помечаем
-    «нужно ещё раз» и текущий запуск перед выходом перечитает данные заново."""
-    global _dashboard_dirty
-    if not _dashboard_lock.acquire(blocking=False):
-        with _dashboard_dirty_lock:
-            _dashboard_dirty = True
-        log.info("update_dashboard: пересборка уже идёт, запросили повтор после неё")
-        return
-    try:
-        while True:
-            with _dashboard_dirty_lock:
-                _dashboard_dirty = False
-            _rebuild_dashboard(dt, snapshot=snapshot)
-            with _dashboard_dirty_lock:
-                if not _dashboard_dirty:
-                    break
-                log.info("update_dashboard: за время пересборки пришло новое событие, повторяем")
-    finally:
-        _dashboard_lock.release()
-
-
-def _clear_block(range_):
-    """Чистит весь зарезервированный диапазон блока ПЕРЕД записью — иначе если
-    новых строк меньше, чем было в предыдущей пересборке, старые «хвостовые»
-    строки остаются висеть (см. инцидент 30.06.2026 — Никита Фоменко
-    задублировался на дашборде после череды быстрых рестартов бота)."""
-    try:
-        _svc().spreadsheets().values().clear(spreadsheetId=SPREADSHEET_ID, range=f"Дашборд!{range_}").execute()
-    except Exception as ex:
-        log.warning(f"_clear_block: не удалось очистить {range_}: {ex}")
-
-
-def _rebuild_dashboard(dt, snapshot=None):
-    today_str = dt.strftime("%d.%m.%Y")
-
-    # Блок 1: кто сейчас на работе — только СЕГОДНЯШНИЕ открытые записи
-    try:
-        entries = get_open_entries_all(snapshot=snapshot)
-        entries = [e for e in entries if e.get("date") == today_str]
-        _type_labels = {"водитель": "Водитель 🚗", "сервис": "Сервис 🔧"}
-        live_rows = [
-            [e["name"],
-             e.get("location") or _type_labels.get(e.get("emp_type", ""), "—"),
-             e["arrival"]]
-            for e in entries
-        ] if entries else [["Сейчас никто не на работе", "", ""]]
-        _clear_block("A6:C21")
-        _write("Дашборд", "A6", live_rows)
-    except Exception as ex:
-        log.warning(f"_rebuild_dashboard block1 (кто на работе): {ex}")
-
-    # Блок GPS-аномалии (последние 20, новые сверху)
-    try:
-        try:
-            gps_rows = _read("GPS лог", "A2:I500")
-        except Exception:
-            gps_rows = []
-        anomalies = [r for r in gps_rows if len(r) >= 9 and str(r[8]).strip()]
-        anomalies = list(reversed(anomalies))[:20]
-        anomaly_rows = [[r[0], r[1], r[3], r[4], r[8]] for r in anomalies] \
-            if anomalies else [["Аномалий не найдено", "", "", "", ""]]
-        _clear_block("A31:E52")
-        _write("Дашборд", "A31", anomaly_rows)
-    except Exception as ex:
-        log.warning(f"_rebuild_dashboard block_gps (аномалии): {ex}")
-
-    # Блок месячная сводка по сотрудникам
-    try:
-        if snapshot is not None:
-            employees = snapshot["active_names"]
-        else:
-            emp_rows = _read("Сотрудники", "A2:E200")
-            employees = [r[1].strip() for r in emp_rows if len(r) >= 5 and r[4].strip().lower() == "да"]
-
-        sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-        days_in_month = calendar.monthrange(dt.year, dt.month)[1]
-        month_rows = _read(sheet, "A2:AH100")
-        name_to_row = {r[0].strip(): r for r in month_rows if r}
-
-        journal_rows = _read("Журнал", "A2:I500")
-        month_prefix = f".{dt.month:02d}.{dt.year}"
-
-        workdays_so_far = sum(
-            1 for d in range(1, dt.day + 1)
-            if date(dt.year, dt.month, d).weekday() < 5
-        )
-
-        summary_rows = []
-        for name in employees:
-            row = name_to_row.get(name, [])
-            day_cells = row[1:1 + days_in_month] if len(row) > 1 else []
-            total = row[1 + days_in_month] if len(row) > 1 + days_in_month else ""
-            days_present = sum(1 for c in day_cells if str(c).strip())
-            auto_closed = sum(
-                1 for r in journal_rows
-                if len(r) >= 8 and r[1].strip() == name and r[0].endswith(month_prefix) and r[7] == "⚠️ авто"
-            )
-            pct = round(days_present / workdays_so_far * 100) if workdays_so_far else 0
-            summary_rows.append([name, total, days_present, auto_closed, f"{pct}%"])
-
-        if summary_rows:
-            _clear_block("A55:E79")
-            _write("Дашборд", "A55", summary_rows)
-    except Exception as ex:
-        log.warning(f"_rebuild_dashboard block_monthly (сводка): {ex}")
-
-    # Блок реестр уведомлений за сегодня — план + факт
-    try:
-        plan = get_today_notification_plan(dt)
-        if plan:
-            notif_rows = []
-            for p in plan:
-                try:
-                    notif_rows.append([
-                        p.get("actual_time") or p["planned_at"].strftime("%H:%M"),
-                        p["name"], p["type"],
-                        p["planned_at"].strftime("%H:%M"),
-                        p.get("status", "?"),
-                    ])
-                except Exception as ex:
-                    log.warning(f"_rebuild_dashboard: ошибка строки уведомления: {ex}")
-            if not notif_rows:
-                notif_rows = [["—", "—", "—", "—", "уведомлений сегодня нет"]]
-        else:
-            # Нет плановых уведомлений (расписание не задано), но могут быть фактические
-            sent = get_today_notifications(dt)
-            if sent:
-                notif_rows = [[r[1], r[2], r[3], r[4], r[5]] for r in sent if len(r) >= 6]
-            else:
-                notif_rows = [["—", "—", "—", "—", "уведомлений сегодня нет"]]
-        _clear_block("A82:E120")
-        _write("Дашборд", "A82", notif_rows)
-    except Exception as ex:
-        log.warning(f"_rebuild_dashboard block_notif (реестр): {ex}")
 
 
 def setup_spreadsheet():

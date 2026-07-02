@@ -286,12 +286,14 @@ def btn_notifications(message):
 
 @bot.message_handler(func=lambda m: m.text == "🔄 Обновить дашборд")
 def btn_refresh_dashboard(message):
+    """Дашборд — живые формулы, обновляется сам. Кнопка форсирует только
+    проверку orphaned-записей и синхронизацию имён, не дожидаясь цикла в 5 мин."""
     if message.from_user.id not in ADMIN_IDS:
         return
-    msg = bot.send_message(message.chat.id, "🔄 Обновляю дашборд...")
+    msg = bot.send_message(message.chat.id, "🔄 Проверяю незакрытые записи и имена...")
     try:
         job_update_dashboard()
-        bot.edit_message_text("✅ Дашборд обновлён", message.chat.id, msg.message_id)
+        bot.edit_message_text("✅ Проверено (дашборд и так живой, формулы)", message.chat.id, msg.message_id)
     except Exception as ex:
         bot.edit_message_text(f"⚠️ Ошибка: {ex}", message.chat.id, msg.message_id)
 
@@ -506,10 +508,7 @@ def btn_shift_end(message):
     bot.send_message(message.chat.id,
         f"🏁 Смена завершена!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>",
         reply_markup=main_kb(emp["type"], is_admin=(message.from_user.id in ADMIN_IDS)))
-    run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
-    run_background(sheets.resync_green_for, emp["name"], dt)
     run_background(sheets.update_employee_location, message.from_user.id, "")
-    run_background(sheets.update_dashboard, dt)
 
 
 @bot.message_handler(func=lambda m: m.text == "📍 Отправить точку")
@@ -576,7 +575,6 @@ def handle_location(message):
             still_loc = entry.get("location", "") if entry else ""
             sheets.update_employee_location(uid, still_loc)
             check_gps_and_alert(uid, emp["name"], still_loc, lat, lon, accuracy, dt)
-            sheets.update_dashboard(dt)
         run_background(_followup)
         _state.pop(uid, None)
         return
@@ -604,10 +602,8 @@ def handle_location(message):
             f"{icon} {'Приход' if emp['type'] == 'объект' else 'Смена начата'}!\n{loc_line}🕒 {dt.strftime('%H:%M')}{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
         run_background(sheets.update_monthly_on_arrival, emp["name"], dt)
-        run_background(sheets.resync_green_for, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, loc_name)
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
-        run_background(sheets.update_dashboard, dt)
         _state.pop(uid, None)
 
     elif step == "geo_departure":
@@ -633,11 +629,8 @@ def handle_location(message):
         bot.send_message(message.chat.id,
             f"🚪 Уход записан!\n🕒 {dt.strftime('%H:%M')}\n⏱ Отработано: <b>{worked}</b>{dist_msg}",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
-        run_background(sheets.update_monthly_on_departure, emp["name"], dt, hours_decimal)
-        run_background(sheets.resync_green_for, emp["name"], dt)
         run_background(sheets.update_employee_location, uid, "")
         run_background(check_gps_and_alert, uid, emp["name"], loc_name, lat, lon, accuracy, dt)
-        run_background(sheets.update_dashboard, dt)
         _state.pop(uid, None)
 
     else:
@@ -752,27 +745,11 @@ def job_schedule_check():
                 log.warning(f"Admin schedule report failed: {ex}")
 
 
-def job_resync_green():
-    """Каждые 5 мин: один batchUpdate расставляет все цвета сегодняшнего столбца."""
-    dt = now()
-    try:
-        snap = sheets.read_today_snapshot(dt)
-        on_shift = {e["name"] for e in snap["open"] if e["date"] == snap["today_str"]}
-        log.info(f"job_resync_green: на смене={list(on_shift)}")
-        white_names = [
-            e["name"] for e in snap["closed_today"]
-            if e["name"] not in on_shift and "авто" not in e.get("status", "")
-        ]
-        sheets.batch_month_colors(dt, green_names=list(on_shift), white_names=white_names)
-        log.info(f"job_resync_green: зелёных={len(on_shift)}, белых={len(white_names)}")
-    except Exception as ex:
-        log.warning(f"job_resync_green: {ex}", exc_info=True)
-
-
 def job_update_dashboard():
     """Каждые 5 мин: закрывает orphaned записи прошлых дней (краш бота =
-    job_close_21 не сработал), синхронизирует переименования по TG ID,
-    пересчитывает Итого-за-сегодня, обновляет дашборд.
+    job_close_21 не сработал), синхронизирует переименования по TG ID.
+    Дашборд/цвета/часы больше не пересчитываются кодом — это живые формулы
+    и условное форматирование прямо в таблице (миграция 02.07.2026).
     Каждый шаг изолирован — сбой в одном не отменяет остальные."""
     dt = now()
     snap = None
@@ -781,27 +758,13 @@ def job_update_dashboard():
     except Exception as ex:
         log.warning(f"job_update_dashboard: read_today_snapshot: {ex}")
     try:
-        closed = sheets.close_orphaned_entries(dt, snapshot=snap)
-        if closed:
-            # Снапшот устарел — записи закрыты, читаем заново
-            try:
-                snap = sheets.read_today_snapshot(dt)
-            except Exception:
-                snap = None
+        sheets.close_orphaned_entries(dt, snapshot=snap)
     except Exception as ex:
         log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
     try:
         sheets.sync_employee_names(dt)
     except Exception as ex:
         log.warning(f"job_update_dashboard: sync_employee_names: {ex}")
-    try:
-        sheets.resync_today_totals(dt, snapshot=snap)
-    except Exception as ex:
-        log.warning(f"job_update_dashboard: resync_today_totals: {ex}")
-    try:
-        sheets.update_dashboard(dt, snapshot=snap)
-    except Exception as ex:
-        log.warning(f"job_update_dashboard: update_dashboard: {ex}")
 
 
 def job_close_21():
@@ -830,9 +793,6 @@ def job_close_21():
                     reply_markup=still_working_kb(e["row"]))
         except Exception as ex:
             log.warning(f"21:00 close error for {e.get('name', '?')}: {ex}")
-
-    if entries:
-        run_background(sheets.update_dashboard, current)
 
 
 def job_remind_2350():
@@ -886,19 +846,14 @@ def job_hard_close():
         except Exception as ex:
             log.warning(f"Hard close error for {e.get('name', '?')}: {ex}")
 
-    if entries:
-        run_background(sheets.update_dashboard, current)
-
 
 def job_reconcile():
-    """00:10 — сверка вчерашнего дня: Журнал vs лист месяца (пропуски) +
-    целостность каждой записи Журнала (Отработано vs реальная разница
-    уход-приход, см. инцидент 30.06.2026)."""
+    """00:10 — закрывает незакрытые записи прошлых дней (краш бота).
+    Часы/дашборд/цвета — живые формулы, сверять их больше не нужно
+    (миграция 02.07.2026, см. KNOWLEDGE.md)."""
     current = now()
-    yesterday = current - timedelta(days=1)
     lines = []
 
-    # Закрываем записи из прошлых дней которые остались открытыми (краш бота)
     try:
         orphaned = sheets.close_orphaned_entries(current)
     except Exception as ex:
@@ -909,34 +864,12 @@ def job_reconcile():
         for o in orphaned:
             lines.append(f"  • {o['name']} ({o['date']})")
 
-    try:
-        fixed_gaps = sheets.reconcile_day(yesterday)
-    except Exception as ex:
-        log.warning(f"Reconcile error: {ex}")
-        fixed_gaps = []
-    if fixed_gaps:
-        lines.append(f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b> — исправлены расхождения:")
-        for f in fixed_gaps:
-            was = f.get("was", 0)
-            lines.append(f"  • {f['name']} — {was}ч → {f['hours']}ч")
-
-    try:
-        fixed_integrity = sheets.verify_journal_integrity()
-    except Exception as ex:
-        log.warning(f"Integrity check error: {ex}")
-        fixed_integrity = []
-    if fixed_integrity:
-        lines.append("⚠️ <b>Найдены неверные часы в Журнале — исправлено:</b>")
-        for f in fixed_integrity:
-            lines.append(f"  • {f['name']} ({f['date']}): {f['was']} → {f['now']}")
-
     if lines:
         text = "\n".join(lines)
         try:
             bot.send_message(224397927, text)  # ночная сверка — только Никите
         except Exception as ex:
             log.warning(f"Reconcile alert failed: {ex}")
-        run_background(sheets.update_dashboard, now())
 
 
 WATCHDOG_TIMEOUT_SEC = 1800  # 30 минут без успешного API вызова = зависший
@@ -1020,12 +953,14 @@ def job_keepalive():
 
 @bot.message_handler(commands=["дашборд", "dashboard"])
 def cmd_dashboard(message):
+    """Дашборд — живые формулы, обновляется сам. Команда форсирует только
+    проверку orphaned-записей и синхронизацию имён."""
     if message.from_user.id not in ADMIN_IDS:
         return
-    msg = bot.reply_to(message, "🔄 Обновляю дашборд...")
+    msg = bot.reply_to(message, "🔄 Проверяю незакрытые записи и имена...")
     try:
         job_update_dashboard()
-        bot.edit_message_text("✅ Дашборд обновлён", message.chat.id, msg.message_id)
+        bot.edit_message_text("✅ Проверено (дашборд и так живой, формулы)", message.chat.id, msg.message_id)
     except Exception as ex:
         bot.edit_message_text(f"⚠️ Ошибка: {ex}", message.chat.id, msg.message_id)
 
@@ -1059,12 +994,11 @@ if __name__ == "__main__":
 
     scheduler = BackgroundScheduler()
     scheduler.add_job(job_schedule_check,   "interval", minutes=5)   # каждые 5 мин: до/после начала, до конца
-    scheduler.add_job(job_resync_green,     "interval", minutes=5)   # каждые 5 мин: подсветка зелёным тех, кто на смене
-    scheduler.add_job(job_update_dashboard, "interval", minutes=5)   # каждые 5 мин: все код-зависимые блоки Дашборда
+    scheduler.add_job(job_update_dashboard, "interval", minutes=5)   # каждые 5 мин: orphaned-записи + синхронизация имён
     scheduler.add_job(job_close_21,         "cron",     hour=21, minute=0)   # 21:00 авто-закрытие всех + кнопка продления
     scheduler.add_job(job_remind_2350,      "cron",     hour=23, minute=50)  # 23:50 напоминание продлившим
     scheduler.add_job(job_hard_close,       "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие
-    scheduler.add_job(job_reconcile,        "cron",     hour=0,  minute=10)  # 00:10 сверка прошедшего дня
+    scheduler.add_job(job_reconcile,        "cron",     hour=0,  minute=10)  # 00:10 закрытие незакрытых записей
     scheduler.add_job(job_keepalive,        "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
     scheduler.start()
     run_background(sheets.setup_spreadsheet)  # однократная настройка таблицы
