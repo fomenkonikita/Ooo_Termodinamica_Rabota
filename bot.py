@@ -1,8 +1,11 @@
 import os
 import logging
 import threading
+import tracemalloc
 from math import radians, cos, sin, asin, sqrt
 from datetime import datetime, timedelta
+
+tracemalloc.start()  # диагностика памяти — как можно раньше, до тяжёлых импортов
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -875,14 +878,47 @@ def job_reconcile():
 WATCHDOG_TIMEOUT_SEC = 1800  # 30 минут без успешного API вызова = зависший
 
 
+def _current_rss_mb():
+    """Текущая резидентная память процесса в МБ (Linux /proc, как у Render)."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024
+    except Exception:
+        pass
+    return None
+
+
+def _memory_report(top_n=15):
+    """Текущий RSS + top-N мест в коде, которые держат больше всего памяти
+    (tracemalloc) — диагностика OOM на Render (02.07.2026), вместо гадания."""
+    rss = _current_rss_mb()
+    lines = [f"RSS: {rss:.1f} МБ" if rss is not None else "RSS: н/д"]
+    try:
+        snapshot = tracemalloc.take_snapshot()
+        top = snapshot.statistics("lineno")[:top_n]
+        for i, stat in enumerate(top, 1):
+            lines.append(f"{i:2d}. {stat}")
+    except Exception as ex:
+        lines.append(f"tracemalloc error: {ex}")
+    return "\n".join(lines)
+
+
 def run_watchdog():
     """Сторож: если 30 минут подряд НИ ОДИН запрос к Google API не прошёл
     успешно, бот сам себя завершает — Render поднимает новый процесс.
-    Таймаут 30 мин (не 10) чтобы rolling deploy успел пройти health check."""
+    Таймаут 30 мин (не 10) чтобы rolling deploy успел пройти health check.
+    Заодно каждую минуту логирует память — диагностика OOM (02.07.2026)."""
     import time as _time
     _time.sleep(120)  # дать время на старт и первый API вызов
     while True:
         _time.sleep(60)
+        rss = _current_rss_mb()
+        if rss is not None:
+            log.info(f"MEM: RSS={rss:.1f}МБ")
+            if rss > 350:  # приближаемся к лимиту 512МБ — берём полный снимок
+                log.warning(f"MEM: высокое потребление, снимок tracemalloc:\n{_memory_report()}")
         stale_for = _time.time() - sheets.last_successful_api_call
         if stale_for > WATCHDOG_TIMEOUT_SEC:
             log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — перезапуск")
@@ -906,6 +942,10 @@ def run_health_server():
         if stale_for > WATCHDOG_TIMEOUT_SEC:
             return f"STALE: no Google API call in {int(stale_for)}s", 503
         return f"OK: last API call {int(stale_for)}s ago", 200
+
+    @app.route("/memory")
+    def memory_report():
+        return _memory_report(), 200, {"Content-Type": "text/plain; charset=utf-8"}
 
     @app.route("/_restart")
     def force_restart():
