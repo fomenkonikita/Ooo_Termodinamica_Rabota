@@ -458,7 +458,7 @@ def reconcile_month_colors(dt_month):
 def get_today_notifications(dt):
     """Реестр уведомлений за сегодня — для админ-кнопки."""
     try:
-        rows = _read("Уведомления", "A2:G3000")
+        rows = _read("Уведомления", "A2:G500")
     except Exception:
         return []
     today = dt.strftime("%d.%m.%Y")
@@ -772,7 +772,7 @@ def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt, check
         if check_accuracy and (not accuracy or accuracy <= 0):
             reasons.append("нет данных о точности GPS (horizontal_accuracy)")
 
-        rows = _read("GPS лог", "A2:H5000")
+        rows = _read("GPS лог", "A2:H500")
         for row in rows:
             if len(row) < 7:
                 continue
