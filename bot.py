@@ -915,9 +915,10 @@ def job_reconcile():
         log.warning(f"Reconcile error: {ex}")
         fixed_gaps = []
     if fixed_gaps:
-        lines.append(f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b> — дозаполнены пропуски:")
+        lines.append(f"🔧 <b>Автосверка за {yesterday.strftime('%d.%m.%Y')}</b> — исправлены расхождения:")
         for f in fixed_gaps:
-            lines.append(f"  • {f['name']} — {f['hours']}ч")
+            was = f.get("was", 0)
+            lines.append(f"  • {f['name']} — {was}ч → {f['hours']}ч")
 
     try:
         fixed_integrity = sheets.verify_journal_integrity()

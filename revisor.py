@@ -7,14 +7,27 @@ revisor.py — агент-ревизор бота учёта рабочего в
   SPREADSHEET_ID (по умолчанию: 1DZ_XQPAGbSn5aCKVqcBBRQ-X4sAItx23v-qJEw1dYbo)
   TZ_OFFSET (по умолчанию: 5)
 
-Выдаёт структурированный список нарушений по 30 критериям.
+Выдаёт структурированный список нарушений по 50 критериям.
 Критика сгруппирована по блокам: КРИТИЧНО / ОШИБКА / ПРЕДУПРЕЖДЕНИЕ / ИНФО.
 """
 
 import os
 import sys
+import io
 import calendar
 from datetime import datetime, timedelta, date
+
+# Windows: форсируем UTF-8 вывод (cp1251 не поддерживает эмодзи)
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+# Загружаем .env если есть
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -63,7 +76,6 @@ def _svc():
             token_uri="https://oauth2.googleapis.com/token",
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         creds.refresh(Request())
         authed_http = AuthorizedHttp(creds, http=httplib2.Http(timeout=30))
@@ -513,6 +525,59 @@ def run_checks(d):
             f"Отсутствуют: {sorted(missing)}")
 
     # ────────────────────────────────────────────────────────────────────────────
+    # 16b. Дашборд месячная сводка: значения не совпадают с месячным листом
+    # ────────────────────────────────────────────────────────────────────────────
+    current_sheet_name = f"{MONTHS_RU[now.month]} {now.year}"
+    current_month_data = d.get("monthly_sheets", {}).get(current_sheet_name)
+    if current_month_data:
+        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        month_rows = current_month_data["rows"]
+        name_to_month_row = {str(r[0]).strip(): r for r in month_rows if r and str(r[0]).strip()}
+
+        dash_value_errors = []
+        for dash_row in dash_monthly:
+            if not dash_row:
+                continue
+            name = str(dash_row[0]).strip()
+            if not name:
+                continue
+            dash_total = str(dash_row[1]).strip() if len(dash_row) > 1 else ""
+            dash_days  = str(dash_row[2]).strip() if len(dash_row) > 2 else ""
+
+            month_row = name_to_month_row.get(name, [])
+            # Итого: индекс days_in_month+1 (после A + 31 дней)
+            real_total = str(month_row[days_in_month + 1]).strip() \
+                if len(month_row) > days_in_month + 1 else ""
+            real_days = sum(1 for c in month_row[1:days_in_month + 1] if str(c).strip())
+
+            # Сравниваем итого (приводим запятую→точка)
+            try:
+                dt_num = float(dash_total.replace(",", ".")) if dash_total else 0.0
+                rt_num = float(real_total.replace(",", ".")) if real_total else 0.0
+                total_mismatch = abs(dt_num - rt_num) > 0.05
+            except Exception:
+                total_mismatch = dash_total != real_total
+
+            try:
+                dd_num = int(dash_days) if dash_days else 0
+                days_mismatch = dd_num != real_days
+            except Exception:
+                days_mismatch = False
+
+            if total_mismatch or days_mismatch:
+                parts = []
+                if total_mismatch:
+                    parts.append(f"итого: дашборд={dash_total or '(пусто)'}, лист={real_total or '(пусто)'}")
+                if days_mismatch:
+                    parts.append(f"дней: дашборд={dash_days}, лист={real_days}")
+                dash_value_errors.append(f"{name}: {'; '.join(parts)}")
+
+        if dash_value_errors:
+            add("ОШИБКА", 16,
+                "Дашборд месячная сводка: значения расходятся с месячным листом",
+                "\n".join(dash_value_errors))
+
+    # ────────────────────────────────────────────────────────────────────────────
     # 17. Дашборд реестр уведомлений пустой, но в листе Уведомления есть записи за сегодня
     # ────────────────────────────────────────────────────────────────────────────
     notifications = d.get("notifications", [])
@@ -874,6 +939,388 @@ def run_checks(d):
         add("ПРЕДУПРЕЖДЕНИЕ", 30,
             "Сотрудники: строки в старом формате (менее 5 колонок, нет колонки Активен)",
             "\n".join(str(n) for n in names))
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # 31-50. ПЕРЕКРЁСТНЫЕ КРИТЕРИИ (источник A == источник B, не просто "есть строка")
+    # ════════════════════════════════════════════════════════════════════════════
+
+    open_entry_by_name = {}
+    for e in open_entries_today:
+        r = e["row"]
+        if len(r) > 1 and r[1].strip():
+            open_entry_by_name[r[1].strip()] = r
+
+    today_entries = [e for e in journal_entries if e["date"] == today_str]
+    cur_month_suffix = f".{now.month:02d}.{now.year}"
+    cur_month_entries = [e for e in journal_entries if e["date"].endswith(cur_month_suffix)]
+
+    _type_labels = {"водитель": "Водитель 🚗", "сервис": "Сервис 🔧"}
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 31. Дашборд блок1: время прихода (C) ≠ Журнал!E открытой записи
+    # ────────────────────────────────────────────────────────────────────────────
+    arrival_mismatches = []
+    for r in dash_block1:
+        if not r or not str(r[0]).strip():
+            continue
+        name = str(r[0]).strip()
+        jr = open_entry_by_name.get(name)
+        if not jr or len(jr) < 5:
+            continue
+        dash_time = str(r[2]).strip() if len(r) > 2 else ""
+        journal_time = str(jr[4]).strip()
+        if dash_time != journal_time:
+            arrival_mismatches.append(f"{name}: дашборд={dash_time or '(пусто)'}, Журнал!E={journal_time or '(пусто)'}")
+    if arrival_mismatches:
+        add("ОШИБКА", 31, "Дашборд блок1: время прихода не совпадает с Журнал!E",
+            "\n".join(arrival_mismatches))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 32. Дашборд блок1: локация (B) ≠ Журнал!D (Объект) — только для объектных смен
+    # ────────────────────────────────────────────────────────────────────────────
+    location_mismatches = []
+    for r in dash_block1:
+        if not r or not str(r[0]).strip():
+            continue
+        name = str(r[0]).strip()
+        jr = open_entry_by_name.get(name)
+        if not jr or len(jr) < 4:
+            continue
+        journal_object = str(jr[3]).strip() if len(jr) > 3 else ""
+        if not journal_object:
+            continue  # это водитель/сервис — сверяется в 34, тут не объект
+        dash_loc = str(r[1]).strip() if len(r) > 1 else ""
+        if dash_loc != journal_object:
+            location_mismatches.append(f"{name}: дашборд={dash_loc or '(пусто)'}, Журнал!D={journal_object}")
+    if location_mismatches:
+        add("ОШИБКА", 32, "Дашборд блок1: локация не совпадает с Журнал!D (Объект)",
+            "\n".join(location_mismatches))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 33. Дублирующиеся имена в блоке 1 дашборда
+    # ────────────────────────────────────────────────────────────────────────────
+    block1_name_count = defaultdict(int)
+    for r in dash_block1:
+        if r and str(r[0]).strip():
+            block1_name_count[str(r[0]).strip()] += 1
+    block1_dups = {n: c for n, c in block1_name_count.items() if c > 1}
+    if block1_dups:
+        add("КРИТИЧНО", 33, "Дашборд блок1: одно имя встречается несколько раз",
+            "\n".join(f"{n}: {c} раз" for n, c in block1_dups.items()))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 34. Дашборд блок1: тип (водитель/сервис) ≠ Сотрудники!C (тип изменился после отметки)
+    # ────────────────────────────────────────────────────────────────────────────
+    type_label_mismatches = []
+    for r in dash_block1:
+        if not r or not str(r[0]).strip():
+            continue
+        name = str(r[0]).strip()
+        jr = open_entry_by_name.get(name)
+        if not jr or len(jr) < 4:
+            continue
+        journal_object = str(jr[3]).strip() if len(jr) > 3 else ""
+        if journal_object:
+            continue  # объектная смена, локация сверяется в 32
+        emp_row = name_to_emp_row.get(name, [])
+        cur_type = emp_row[2].strip().lower() if len(emp_row) > 2 else ""
+        expected_label = _type_labels.get(cur_type, "—")
+        dash_label = str(r[1]).strip() if len(r) > 1 else ""
+        if dash_label != expected_label:
+            type_label_mismatches.append(
+                f"{name}: дашборд={dash_label or '(пусто)'}, ожидалось по Сотрудники!C='{cur_type}' → {expected_label}")
+    if type_label_mismatches:
+        add("ПРЕДУПРЕЖДЕНИЕ", 34,
+            "Дашборд блок1: тип не совпадает с текущим Сотрудники!C (изменился после отметки прихода)",
+            "\n".join(type_label_mismatches))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 35/36. Сводка: Итого / Дней ≠ значениям месячного листа (детализация 16b)
+    # ────────────────────────────────────────────────────────────────────────────
+    my_sheet_name = f"{MONTHS_RU[now.month]} {now.year}"
+    my_month_data = d.get("monthly_sheets", {}).get(my_sheet_name)
+    if my_month_data:
+        my_days_in_month = calendar.monthrange(now.year, now.month)[1]
+        my_name_to_row = {str(r[0]).strip(): r for r in my_month_data["rows"] if r and str(r[0]).strip()}
+
+        total_errors_35, days_errors_36 = [], []
+        for dr in dash_monthly:
+            if not dr or not str(dr[0]).strip():
+                continue
+            name = str(dr[0]).strip()
+            mrow = my_name_to_row.get(name, [])
+            real_total = str(mrow[my_days_in_month + 1]).strip() if len(mrow) > my_days_in_month + 1 else ""
+            real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if str(c).strip())
+
+            dash_total = str(dr[1]).strip() if len(dr) > 1 else ""
+            try:
+                if abs((float(dash_total.replace(",", ".")) if dash_total else 0.0) -
+                       (float(real_total.replace(",", ".")) if real_total else 0.0)) > 0.05:
+                    total_errors_35.append(f"{name}: дашборд={dash_total or '(пусто)'}, лист={real_total or '(пусто)'}")
+            except Exception:
+                if dash_total != real_total:
+                    total_errors_35.append(f"{name}: дашборд={dash_total or '(пусто)'}, лист={real_total or '(пусто)'}")
+
+            dash_days = str(dr[2]).strip() if len(dr) > 2 else ""
+            try:
+                if (int(dash_days) if dash_days else 0) != real_days:
+                    days_errors_36.append(f"{name}: дашборд={dash_days or '0'}, факт непустых ячеек={real_days}")
+            except Exception:
+                pass
+
+        if total_errors_35:
+            add("ОШИБКА", 35, "Сводка: Итого не совпадает с Итого месячного листа", "\n".join(total_errors_35))
+        if days_errors_36:
+            add("ОШИБКА", 36, "Сводка: Дней присутствия не совпадает с числом непустых ячеек в месячном листе",
+                "\n".join(days_errors_36))
+
+        # ────────────────────────────────────────────────────────────────────────
+        # 37. Сводка: Авто-закрытий ≠ count(⚠️ авто) в Журнале за месяц
+        # ────────────────────────────────────────────────────────────────────────
+        auto_count_by_name = defaultdict(int)
+        for e in cur_month_entries:
+            r = e["row"]
+            if len(r) >= 8 and str(r[7]).strip() == "⚠️ авто":
+                auto_count_by_name[r[1].strip()] += 1
+        auto_errors = []
+        for dr in dash_monthly:
+            if not dr or not str(dr[0]).strip():
+                continue
+            name = str(dr[0]).strip()
+            dash_auto = str(dr[3]).strip() if len(dr) > 3 else ""
+            try:
+                dash_auto_n = int(dash_auto) if dash_auto else 0
+            except Exception:
+                continue
+            real_auto = auto_count_by_name.get(name, 0)
+            if dash_auto_n != real_auto:
+                auto_errors.append(f"{name}: дашборд={dash_auto_n}, Журнал={real_auto}")
+        if auto_errors:
+            add("ОШИБКА", 37, "Сводка: Авто-закрытий не совпадает со счётом '⚠️ авто' в Журнале за месяц",
+                "\n".join(auto_errors))
+
+        # ────────────────────────────────────────────────────────────────────────
+        # 38. Сводка: % посещаемости ≠ round(дней/рабочих_дней_до_сегодня*100), допуск ±1%
+        #     Только для сотрудников с графиком Пн-Пт или пустым полем (см. Эталон)
+        # ────────────────────────────────────────────────────────────────────────
+        workdays_so_far = sum(1 for dd in range(1, now.day + 1)
+                              if date(now.year, now.month, dd).weekday() < 5)
+        pct_errors = []
+        if workdays_so_far:
+            for dr in dash_monthly:
+                if not dr or not str(dr[0]).strip():
+                    continue
+                name = str(dr[0]).strip()
+                emp_row = name_to_emp_row.get(name, [])
+                work_days_str = emp_row[7].strip() if len(emp_row) > 7 else ""
+                wd = parse_work_days(work_days_str) if work_days_str else None
+                if wd is not None and wd != frozenset({0, 1, 2, 3, 4}):
+                    continue  # нестандартный график — формула не применима (см. Эталон)
+                mrow = my_name_to_row.get(name, [])
+                real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if str(c).strip())
+                expected_pct = round(real_days / workdays_so_far * 100)
+                dash_pct_str = str(dr[4]).strip().replace("%", "") if len(dr) > 4 else ""
+                try:
+                    dash_pct = int(dash_pct_str) if dash_pct_str else 0
+                except Exception:
+                    continue
+                if abs(dash_pct - expected_pct) > 1:
+                    pct_errors.append(f"{name}: дашборд={dash_pct}%, ожидалось={expected_pct}%")
+        if pct_errors:
+            add("ОШИБКА", 38, "Сводка: % посещаемости не совпадает с формулой (допуск ±1%)",
+                "\n".join(pct_errors))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 39. Сводка: Итого=0/пусто, но в Журнале за месяц есть закрытые смены с часами > 0
+    # ────────────────────────────────────────────────────────────────────────────
+    month_hours_by_name = defaultdict(float)
+    for e in cur_month_entries:
+        r = e["row"]
+        if len(r) < 7 or not str(r[5]).strip():
+            continue
+        try:
+            h, m = str(r[6]).strip().split(":")
+            month_hours_by_name[r[1].strip()] += int(h) + int(m) / 60
+        except Exception:
+            pass
+    zero_total_errors = []
+    for dr in dash_monthly:
+        if not dr or not str(dr[0]).strip():
+            continue
+        name = str(dr[0]).strip()
+        dash_total = str(dr[1]).strip() if len(dr) > 1 else ""
+        if dash_total and dash_total not in ("0", "0.0", "0,0"):
+            continue
+        real_hours = month_hours_by_name.get(name, 0.0)
+        if real_hours > 0.05:
+            zero_total_errors.append(f"{name}: дашборд Итого={dash_total or '(пусто)'}, но в Журнале {round(real_hours,2)}ч")
+    if zero_total_errors:
+        add("ОШИБКА", 39, "Сводка: Итого=0/пусто, хотя в Журнале за месяц есть часы",
+            "\n".join(zero_total_errors))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 40. Сотрудник в сводке, но Активен ≠ "да" в Сотрудники
+    # ────────────────────────────────────────────────────────────────────────────
+    inactive_in_summary = []
+    for dr in dash_monthly:
+        if not dr or not str(dr[0]).strip():
+            continue
+        name = str(dr[0]).strip()
+        emp_row = name_to_emp_row.get(name, [])
+        active_col = emp_row[4].strip().lower() if len(emp_row) > 4 else ""
+        if active_col != "да":
+            inactive_in_summary.append(f"{name}: Активен={active_col or '(пусто)'}")
+    if inactive_in_summary:
+        add("ПРЕДУПРЕЖДЕНИЕ", 40, "Сводка: сотрудник присутствует, но не активен в Сотрудники",
+            "\n".join(inactive_in_summary))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 41-45. Реестр уведомлений дашборда (A82:E120) vs лист Уведомления
+    #        Структура реестра: [время_факт_или_план, имя, тип, время_план, статус]
+    #        Ключ сопоставления с листом Уведомления: (имя, тип)
+    # ────────────────────────────────────────────────────────────────────────────
+    PLANNED_STATUSES = {"запланировано", "ожидает отправки", "ПРОПУЩЕНО", "—"}
+    notif_by_key = {}  # (имя, тип) -> row Уведомления (последняя за сегодня)
+    for r in today_notifs:
+        if len(r) >= 4:
+            notif_by_key[(r[2].strip(), r[3].strip())] = r
+
+    real_notif_rows = [r for r in dash_notif if r and str(r[1] if len(r) > 1 else "").strip()
+                        and str(r[1]).strip() != "—"]
+
+    time_errs, status_errs, name_errs, phantom_errs = [], [], [], []
+    sent_like_count = 0
+    for r in real_notif_rows:
+        name  = str(r[1]).strip() if len(r) > 1 else ""
+        ntype = str(r[2]).strip() if len(r) > 2 else ""
+        status = str(r[4]).strip() if len(r) > 4 else ""
+        is_sent_like = status not in PLANNED_STATUSES
+        if not is_sent_like:
+            continue
+        sent_like_count += 1
+        match = notif_by_key.get((name, ntype))
+        if not match:
+            phantom_errs.append(f"{name} / {ntype}: статус='{status}', но записи в Уведомления за сегодня нет")
+            continue
+        # 41: время факт (col0) ≠ Уведомления!B
+        real_time = str(match[1]).strip() if len(match) > 1 else ""
+        dash_time = str(r[0]).strip() if len(r) > 0 else ""
+        if dash_time != real_time:
+            time_errs.append(f"{name} / {ntype}: дашборд={dash_time}, Уведомления!B={real_time}")
+        # 42: статус (col4) ≠ Уведомления!F
+        real_status = str(match[5]).strip() if len(match) > 5 else ""
+        if status != real_status:
+            status_errs.append(f"{name} / {ntype}: дашборд={status}, Уведомления!F={real_status}")
+        # 43: имя (col1) ≠ Уведомления!C (посимвольно, включая пробелы)
+        real_name = str(match[2]) if len(match) > 2 else ""
+        if r[1] != real_name:
+            name_errs.append(f"'{r[1]}' (дашборд) ≠ '{real_name}' (Уведомления!C)")
+
+    if time_errs:
+        add("ОШИБКА", 41, "Реестр уведомлений: время факт не совпадает с Уведомления!B", "\n".join(time_errs))
+    if status_errs:
+        add("ОШИБКА", 42, "Реестр уведомлений: статус не совпадает с Уведомления!F", "\n".join(status_errs))
+    if name_errs:
+        add("ПРЕДУПРЕЖДЕНИЕ", 43, "Реестр уведомлений: имя не побайтово совпадает с Уведомления!C",
+            "\n".join(name_errs))
+
+    # 44: число "фактических" строк реестра ≠ числу записей в Уведомления за сегодня
+    if sent_like_count != len(today_notifs):
+        add("ПРЕДУПРЕЖДЕНИЕ", 44,
+            "Реестр уведомлений: число строк с фактическим статусом ≠ числу записей в Уведомления за сегодня",
+            f"В реестре (факт): {sent_like_count}, в листе Уведомления за сегодня: {len(today_notifs)}")
+
+    # 45: выдуманные уведомления (статус "отправлено", но записи в Уведомления нет)
+    if phantom_errs:
+        add("ПРЕДУПРЕЖДЕНИЕ", 45,
+            "Реестр уведомлений: строка со статусом отправки, но без соответствия в листе Уведомления",
+            "\n".join(phantom_errs))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 46. Журнал (сегодня): Тип (C) ≠ текущий Сотрудники!C для того же сотрудника
+    # ────────────────────────────────────────────────────────────────────────────
+    type_drift = []
+    for e in today_entries:
+        r = e["row"]
+        if len(r) < 3:
+            continue
+        name = r[1].strip()
+        journal_type = str(r[2]).strip().lower()
+        emp_row = name_to_emp_row.get(name, [])
+        cur_type = emp_row[2].strip().lower() if len(emp_row) > 2 else ""
+        if cur_type and journal_type and journal_type != cur_type:
+            type_drift.append(f"{name}: Журнал!C={journal_type}, Сотрудники!C={cur_type}")
+    if type_drift:
+        add("ПРЕДУПРЕЖДЕНИЕ", 46, "Журнал: тип записи не совпадает с текущим типом в Сотрудники",
+            "\n".join(type_drift))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 47. Открытая смена сегодня: Журнал!D (Объект) ≠ Сотрудники!D (Локация)
+    # ────────────────────────────────────────────────────────────────────────────
+    object_drift = []
+    for name, r in open_entry_by_name.items():
+        journal_object = str(r[3]).strip() if len(r) > 3 else ""
+        if not journal_object:
+            continue  # водитель/сервис — нет объекта
+        emp_row = name_to_emp_row.get(name, [])
+        emp_location = str(emp_row[3]).strip() if len(emp_row) > 3 else ""
+        if emp_location and journal_object != emp_location:
+            object_drift.append(f"{name}: Журнал!D={journal_object}, Сотрудники!D={emp_location}")
+    if object_drift:
+        add("ПРЕДУПРЕЖДЕНИЕ", 47, "Открытая смена: объект в Журнале не совпадает с локацией в Сотрудники",
+            "\n".join(object_drift))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 48. Активных в Сотрудники vs строк в текущем месячном листе (двустороннее)
+    # ────────────────────────────────────────────────────────────────────────────
+    if my_month_data:
+        names_in_month = {str(r[0]).strip() for r in my_month_data["rows"] if r and str(r[0]).strip()}
+        missing_rows = active_names - names_in_month
+        ghost_rows = names_in_month - active_names
+        if missing_rows:
+            add("ОШИБКА", 48, "Активный сотрудник без строки в текущем месячном листе",
+                "\n".join(sorted(missing_rows)))
+        if ghost_rows:
+            add("ПРЕДУПРЕЖДЕНИЕ", 48, "Строка в месячном листе для неактивного сотрудника",
+                "\n".join(sorted(ghost_rows)))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 49. Сотрудник неактивен (Активен ≠ "да"), но в Журнале есть записи за текущий месяц
+    # ────────────────────────────────────────────────────────────────────────────
+    inactive_with_entries = defaultdict(int)
+    for e in cur_month_entries:
+        r = e["row"]
+        if len(r) < 2:
+            continue
+        name = r[1].strip()
+        emp_row = name_to_emp_row.get(name, [])
+        active_col = emp_row[4].strip().lower() if len(emp_row) > 4 else ""
+        if emp_row and active_col != "да":
+            inactive_with_entries[name] += 1
+    if inactive_with_entries:
+        add("ПРЕДУПРЕЖДЕНИЕ", 49, "Неактивный сотрудник имеет записи в Журнале за текущий месяц",
+            "\n".join(f"{n}: {c} запись(ей)" for n, c in inactive_with_entries.items()))
+
+    # ────────────────────────────────────────────────────────────────────────────
+    # 50. Месячный лист: Итого пусто, хотя есть непустые ячейки дней (SUM-формула не работает)
+    # ────────────────────────────────────────────────────────────────────────────
+    for sheet_name, mdata in d.get("monthly_sheets", {}).items():
+        dt = mdata["dt"]
+        days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+        broken_sum = []
+        for r in mdata["rows"]:
+            if not r:
+                continue
+            name = str(r[0]).strip()
+            if not name:
+                continue
+            total_cell = str(r[days_in_month + 1]).strip() if len(r) > days_in_month + 1 else ""
+            has_any_day = any(str(c).strip() for c in r[1:days_in_month + 1])
+            if not total_cell and has_any_day:
+                broken_sum.append(name)
+        if broken_sum:
+            add("ОШИБКА", 50, f"{sheet_name}: Итого пусто при наличии заполненных дней (SUM не считает)",
+                "\n".join(broken_sum))
 
 
 # ── MAIN ───────────────────────────────────────────────────────────────────────

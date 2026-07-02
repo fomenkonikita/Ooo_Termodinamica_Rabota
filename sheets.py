@@ -21,6 +21,15 @@ _RETRIABLE = (ssl.SSLError, ConnectionError, TimeoutError, OSError)
 # без единой попытки самовосстановления).
 last_successful_api_call = time.time()
 
+# _service (см. ниже) — один httplib2-коннекшн на весь процесс, а вызывают его
+# одновременно несколько потоков (Telegram polling, APScheduler джобы, Flask).
+# httplib2.Http() не потокобезопасен при конкурентном использовании одного
+# соединения — отсюда `http.client.ResponseNotReady: Request-sent` и в
+# худшем случае повреждение памяти на уровне C (`free(): corrupted unsorted
+# chunks`, инцидент 02.07.2026, процесс падал каждые ~7 мин). Лок сериализует
+# все вызовы к Google API процесса, как уже сделано для дашборда ниже.
+_api_lock = threading.Lock()
+
 
 def _execute(request, max_retries=3):
     """Выполняет запрос к Google API с повтором при транзитных сетевых сбоях
@@ -33,7 +42,8 @@ def _execute(request, max_retries=3):
     last_exc = None
     for attempt in range(max_retries):
         try:
-            result = request.execute()
+            with _api_lock:
+                result = request.execute()
             last_successful_api_call = time.time()
             return result
         except _RETRIABLE as ex:
@@ -56,14 +66,17 @@ _service = None
 
 def _svc():
     global _service
-    if _service is None:
+    if _service is not None:
+        return _service
+    with _api_lock:
+        if _service is not None:  # другой поток мог успеть создать, пока ждали лок
+            return _service
         creds = Credentials(
             token=None,
             refresh_token=REFRESH_TOKEN,
             token_uri="https://oauth2.googleapis.com/token",
             client_id=CLIENT_ID,
             client_secret=CLIENT_SECRET,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"],
         )
         for attempt in range(3):
             try:
@@ -1185,10 +1198,15 @@ def reconcile_day(dt):
             continue
         row         = sheet_rows[row_num - 2] if row_num - 2 < len(sheet_rows) else []
         current_val = row[dt.day] if len(row) > dt.day else ""
-        if not str(current_val).strip():
+        current_str = str(current_val).strip()
+        try:
+            current_decimal = float(current_str.replace(",", ".")) if current_str else 0.0
+        except ValueError:
+            current_decimal = None  # нечисловое значение — не трогаем (может быть формула/пометка)
+        if current_decimal is not None and abs(current_decimal - total) > 0.01:
             col = _col(dt.day)
             _write(sheet, f"{col}{row_num}", [[total]])
-            fixed.append({"name": name, "date": date_str, "hours": total})
+            fixed.append({"name": name, "date": date_str, "hours": total, "was": current_decimal})
     return fixed
 
 

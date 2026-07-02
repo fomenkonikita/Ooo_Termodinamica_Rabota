@@ -8,3 +8,5 @@ clean.bat
 preview_schedule.py
 start.bat
 KNOWLEDGE.md
+_knowledge/
+deploys.json
