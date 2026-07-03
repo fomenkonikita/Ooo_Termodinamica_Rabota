@@ -693,33 +693,43 @@ def _ensure_gps_log_sheet():
     _write("GPS лог", "A1", [["Дата", "Время", "TG ID", "Имя", "Объект", "Lat", "Lon", "Accuracy", "Подозрение"]])
 
 
-def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt, check_accuracy=True):
+def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt):
     """Логирует GPS-замер при отметке и возвращает список причин подозрения на подмену
     геолокации (пустой список = замер выглядит нормально). Не блокирует отметку —
-    только сигнал для админа. check_accuracy=False — для платформ, которые вообще не
-    отдают точность (например MAX), чтобы не алертить на каждую отметку."""
+    только сигнал для админа.
+
+    03.07.2026: флаг "нет данных о точности GPS" убран — Telegram не передаёт
+    horizontal_accuracy при отправке кнопкой, срабатывало на 100% отметок (шум).
+    Вместо него: побитовый повтор координат N раз ПОДРЯД — живой GPS так себя
+    не ведёт (последние знаки гуляют), повтор = кэш Wi-Fi-локации / точка на
+    карте / подмена. 1-2 повтора допускаем (Wi-Fi-локация в помещении реально
+    залипает), с 3-го подряд — алерт."""
     try:
         _ensure_gps_log_sheet()
         lat_r = round(lat, 6)
         lon_r = round(lon, 6)
 
         reasons = []
-        if check_accuracy and (not accuracy or accuracy <= 0):
-            reasons.append("нет данных о точности GPS (horizontal_accuracy)")
-
         rows = _read("GPS лог", "A2:H500")
-        for row in rows:
+        streak = 0  # сколько ПОСЛЕДНИХ подряд отметок этого сотрудника здесь совпали побитово
+        for row in reversed(rows):
             if len(row) < 7:
                 continue
-            if row[2].strip() != str(telegram_id) or row[4].strip() != location:
+            if str(row[2]).strip() != str(telegram_id) or str(row[4]).strip() != location:
                 continue
             try:
-                prev_lat, prev_lon = float(row[5]), float(row[6])
+                # Google возвращает "56,812755" (ru-локаль) — float() ждёт точку.
+                # Из-за этого проверка повтора молча не работала до 03.07.2026.
+                prev_lat = float(str(row[5]).replace(",", "."))
+                prev_lon = float(str(row[6]).replace(",", "."))
             except Exception:
-                continue
-            if round(prev_lat, 6) == lat_r and round(prev_lon, 6) == lon_r:
-                reasons.append(f"координаты побитово совпадают с визитом {row[0]} {row[1]}")
                 break
+            if round(prev_lat, 6) == lat_r and round(prev_lon, 6) == lon_r:
+                streak += 1
+            else:
+                break
+        if streak >= 2:
+            reasons.append(f"координаты побитово повторяются {streak + 1}-й раз подряд")
 
         _append("GPS лог", [
             dt.strftime("%d.%m.%Y"), dt.strftime("%H:%M"), str(telegram_id), name, location,
