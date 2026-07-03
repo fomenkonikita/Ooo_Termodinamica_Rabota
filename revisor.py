@@ -218,18 +218,18 @@ def load_all():
     # Дашборд (редизайн 02.07.2026: контент с колонки B, имена в merged B:C,
     # поэтому сырые строки имеют пустые колонки-прокладки — нормализуем к старой форме)
     try:
-        raw_b1 = _read("Дашборд", "B14:G15")    # B=имя, D=объект/тип, F=приход, G=статус
+        raw_b1 = _read("Дашборд", "B14:G18")    # B=имя, D=объект/тип, F=приход, G=статус (5 строк, 03.07.2026)
         data["dash_block1"] = [
             [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[4] if len(r) > 4 else ""]
             for r in raw_b1 if r
         ]  # → [имя, локация, приход]
-        raw_m = _read("Дашборд", "B18:G22")     # B=имя, D=часы, E=дней, F=авто, G=%
+        raw_m = _read("Дашборд", "B21:G25")     # B=имя, D=часы, E=дней, F=авто, G=%
         data["dash_monthly"] = [
             [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else "",
              r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
             for r in raw_m if r
         ]  # → [имя, итого_ч, дней, авто, %]
-        raw_n = _read("Дашборд", "B26:G28")     # B=имя, D=время, E=тип, F=план, G=статус
+        raw_n = _read("Дашборд", "B29:G38")     # B=имя, D=время, E=тип, F=план, G=статус (10 строк)
         data["dash_notif"] = [
             [r[2] if len(r) > 2 else "", r[0] if len(r) > 0 else "", r[3] if len(r) > 3 else "",
              r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
@@ -513,10 +513,10 @@ def run_checks(d):
     extra_in_dash = dash_names - open_names_today
     missing_in_dash = open_names_today - dash_names
 
-    # Макет 02.07.2026: блок "кто на работе" физически вмещает 2 строки (ARRAY_CONSTRAIN).
-    # Если открытых смен больше — обрезка ожидаема, пропуски не считаются ошибкой,
-    # пока дашборд показывает полные 2 строки и все показанные — валидны.
-    DASH_BLOCK1_CAP = 2
+    # 03.07.2026: блок "кто на работе" вмещает 5 строк (= полный штат, ARRAY_CONSTRAIN).
+    # Если открытых смен больше (штат вырос без расширения блока) — обрезка ожидаема,
+    # пропуски не считаются ошибкой, пока дашборд показывает полные строки.
+    DASH_BLOCK1_CAP = 5
     expected_truncation = (len(open_names_today) > DASH_BLOCK1_CAP
                            and len(dash_names) >= DASH_BLOCK1_CAP)
 
@@ -1266,8 +1266,8 @@ def run_checks(d):
             "\n".join(name_errs))
 
     # 44: число "фактических" строк реестра ≠ числу записей в Уведомления за сегодня
-    # (макет 02.07.2026 вмещает максимум 3 строки — ARRAY_CONSTRAIN, обрезка сверх ожидаема)
-    DASH_NOTIF_CAP = 3
+    # (с 03.07.2026 блок вмещает 10 строк — ARRAY_CONSTRAIN, обрезка сверх ожидаема)
+    DASH_NOTIF_CAP = 10
     expected_in_dash = min(len(today_notifs), DASH_NOTIF_CAP)
     if sent_like_count != expected_in_dash:
         add("ПРЕДУПРЕЖДЕНИЕ", 44,
