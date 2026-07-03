@@ -133,6 +133,17 @@ def _day_cell_worked(c):
     return True
 
 
+def _days_on_site(month_row, days_in_month, name, open_names_today, today_day):
+    """Дней на объекте как считает дашборд (03.07.2026): закрытые дни с часами > 0
+    + открытая смена СЕГОДНЯ (часы появятся в листе только после закрытия,
+    но человек на работе — день засчитан)."""
+    days = sum(1 for c in month_row[1:days_in_month + 1] if _day_cell_worked(c))
+    today_worked = len(month_row) > today_day and _day_cell_worked(month_row[today_day])
+    if name in open_names_today and not today_worked:
+        days += 1
+    return days
+
+
 # ── Форматирование вывода ──────────────────────────────────────────────────────
 
 LEVELS = {"КРИТИЧНО": 0, "ОШИБКА": 1, "ПРЕДУПРЕЖДЕНИЕ": 2, "ИНФО": 3}
@@ -582,7 +593,7 @@ def run_checks(d):
             # Итого: индекс days_in_month+1 (после A + 31 дней)
             real_total = str(month_row[days_in_month + 1]).strip() \
                 if len(month_row) > days_in_month + 1 else ""
-            real_days = sum(1 for c in month_row[1:days_in_month + 1] if _day_cell_worked(c))
+            real_days = _days_on_site(month_row, days_in_month, name, open_names_today, now.day)
 
             # Сравниваем итого (приводим запятую→точка)
             try:
@@ -1086,7 +1097,7 @@ def run_checks(d):
             name = str(dr[0]).strip()
             mrow = my_name_to_row.get(name, [])
             real_total = str(mrow[my_days_in_month + 1]).strip() if len(mrow) > my_days_in_month + 1 else ""
-            real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if _day_cell_worked(c))
+            real_days = _days_on_site(mrow, my_days_in_month, name, open_names_today, now.day)
 
             dash_total = str(dr[1]).strip() if len(dr) > 1 else ""
             try:
@@ -1153,7 +1164,7 @@ def run_checks(d):
                 if wd is not None and wd != frozenset({0, 1, 2, 3, 4}):
                     continue  # нестандартный график — формула не применима (см. Эталон)
                 mrow = my_name_to_row.get(name, [])
-                real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if _day_cell_worked(c))
+                real_days = _days_on_site(mrow, my_days_in_month, name, open_names_today, now.day)
                 expected_pct = round(real_days / workdays_so_far * 100)
                 dash_pct_str = str(dr[4]).strip().replace("%", "") if len(dr) > 4 else ""
                 try:
