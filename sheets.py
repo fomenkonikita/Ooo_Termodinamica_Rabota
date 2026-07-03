@@ -797,7 +797,13 @@ def auto_close_entry(row_num, name, arrival_str, close_dt):
         arr = datetime.strptime(arrival_str, "%H:%M")
         dep = datetime.strptime(departure_str, "%H:%M")
         if dep < arr:
-            dep += timedelta(days=1)
+            # Уход раньше прихода = ошибка вызывающей логики (не ночная смена — бот
+            # закрывает всё в 23:55, через полночь смены не живут). Раньше тут было
+            # dep += 1 день → абсурдные "23:56 отработано" (инцидент 02.07.2026).
+            log.warning(f"auto_close_entry: уход {departure_str} раньше прихода {arrival_str} "
+                        f"({name}, строка {row_num}) — закрываю временем прихода, 0:00 часов")
+            departure_str = arrival_str
+            dep = arr
         total_min     = int((dep - arr).total_seconds() // 60)
         hours_str     = f"{total_min // 60}:{total_min % 60:02d}"
     except Exception:
@@ -937,7 +943,13 @@ def close_orphaned_entries(current_dt, snapshot=None):
                 close_at_21 = entry_date.replace(hour=21, minute=0, second=0, microsecond=0)
                 close_dt = min(close_by_hours, close_at_21)
             else:
-                # Сегодня после 21:00 — закрываем как job_close_21
+                # Сегодня после 21:00 — закрываем как job_close_21.
+                # НО: смена, начавшаяся ПОСЛЕ 21:00 — это не "пропущенный job_close_21",
+                # а легитимная поздняя смена; её закроет job_hard_close в 23:55.
+                # Без этой проверки любой отметившийся после 21:00 закрывался задним
+                # числом в 21:00 (уход < прихода, инцидент 02.07.2026).
+                if arr.hour >= 21:
+                    continue
                 close_at_21 = current_dt.replace(hour=21, minute=0, second=0, microsecond=0)
                 close_by_hours = current_dt.replace(hour=arr.hour, minute=arr.minute, second=0, microsecond=0) + timedelta(hours=8)
                 close_dt = min(close_at_21, close_by_hours)

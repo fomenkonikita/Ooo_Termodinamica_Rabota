@@ -121,6 +121,18 @@ def _hm_to_min(hm):
     return hm[0] * 60 + hm[1]
 
 
+def _day_cell_worked(c):
+    """True если ячейка дня месячного листа означает реальное присутствие.
+    После миграции на формулы (02.07.2026) КАЖДАЯ ячейка дня содержит SUMIFS
+    и показывает '0:00' даже без смен — непустая строка больше не признак работы."""
+    s = str(c).strip()
+    if not s:
+        return False
+    if s in ("0", "0:00", "00:00", "0,00", "0.00"):
+        return False
+    return True
+
+
 # ── Форматирование вывода ──────────────────────────────────────────────────────
 
 LEVELS = {"КРИТИЧНО": 0, "ОШИБКА": 1, "ПРЕДУПРЕЖДЕНИЕ": 2, "ИНФО": 3}
@@ -203,11 +215,26 @@ def load_all():
         data["employees_header"] = []
     data["employees"] = _read("Сотрудники", "A2:H200")
 
-    # Дашборд
+    # Дашборд (редизайн 02.07.2026: контент с колонки B, имена в merged B:C,
+    # поэтому сырые строки имеют пустые колонки-прокладки — нормализуем к старой форме)
     try:
-        data["dash_block1"]   = _read("Дашборд", "A6:C21")
-        data["dash_monthly"]  = _read("Дашборд", "A55:E79")
-        data["dash_notif"]    = _read("Дашборд", "A82:E120")
+        raw_b1 = _read("Дашборд", "B14:G15")    # B=имя, D=объект/тип, F=приход, G=статус
+        data["dash_block1"] = [
+            [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[4] if len(r) > 4 else ""]
+            for r in raw_b1 if r
+        ]  # → [имя, локация, приход]
+        raw_m = _read("Дашборд", "B18:G22")     # B=имя, D=часы, E=дней, F=авто, G=%
+        data["dash_monthly"] = [
+            [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else "",
+             r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
+            for r in raw_m if r
+        ]  # → [имя, итого_ч, дней, авто, %]
+        raw_n = _read("Дашборд", "B26:G28")     # B=имя, D=время, E=тип, F=план, G=статус
+        data["dash_notif"] = [
+            [r[2] if len(r) > 2 else "", r[0] if len(r) > 0 else "", r[3] if len(r) > 3 else "",
+             r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
+            for r in raw_n if r
+        ]  # → [время, имя, тип, план, статус] (старая форма для критериев 41-45)
     except Exception as ex:
         print(f"  ⚠️  Дашборд: {ex}")
         data["dash_block1"] = data["dash_monthly"] = data["dash_notif"] = []
@@ -486,11 +513,18 @@ def run_checks(d):
     extra_in_dash = dash_names - open_names_today
     missing_in_dash = open_names_today - dash_names
 
+    # Макет 02.07.2026: блок "кто на работе" физически вмещает 2 строки (ARRAY_CONSTRAIN).
+    # Если открытых смен больше — обрезка ожидаема, пропуски не считаются ошибкой,
+    # пока дашборд показывает полные 2 строки и все показанные — валидны.
+    DASH_BLOCK1_CAP = 2
+    expected_truncation = (len(open_names_today) > DASH_BLOCK1_CAP
+                           and len(dash_names) >= DASH_BLOCK1_CAP)
+
     if extra_in_dash:
         add("КРИТИЧНО", 13,
             "Дашборд блок 1: показывает людей которых нет в открытых сменах сегодня",
             f"Лишние: {sorted(extra_in_dash)}\nОткрытые сегодня по Журналу: {sorted(open_names_today)}")
-    if missing_in_dash:
+    if missing_in_dash and not expected_truncation:
         add("КРИТИЧНО", 13,
             "Дашборд блок 1: не показывает людей с открытой сменой сегодня",
             f"Пропущены: {sorted(missing_in_dash)}\nДашборд показывает: {sorted(dash_names)}")
@@ -548,7 +582,7 @@ def run_checks(d):
             # Итого: индекс days_in_month+1 (после A + 31 дней)
             real_total = str(month_row[days_in_month + 1]).strip() \
                 if len(month_row) > days_in_month + 1 else ""
-            real_days = sum(1 for c in month_row[1:days_in_month + 1] if str(c).strip())
+            real_days = sum(1 for c in month_row[1:days_in_month + 1] if _day_cell_worked(c))
 
             # Сравниваем итого (приводим запятую→точка)
             try:
@@ -1050,7 +1084,7 @@ def run_checks(d):
             name = str(dr[0]).strip()
             mrow = my_name_to_row.get(name, [])
             real_total = str(mrow[my_days_in_month + 1]).strip() if len(mrow) > my_days_in_month + 1 else ""
-            real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if str(c).strip())
+            real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if _day_cell_worked(c))
 
             dash_total = str(dr[1]).strip() if len(dr) > 1 else ""
             try:
@@ -1117,7 +1151,7 @@ def run_checks(d):
                 if wd is not None and wd != frozenset({0, 1, 2, 3, 4}):
                     continue  # нестандартный график — формула не применима (см. Эталон)
                 mrow = my_name_to_row.get(name, [])
-                real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if str(c).strip())
+                real_days = sum(1 for c in mrow[1:my_days_in_month + 1] if _day_cell_worked(c))
                 expected_pct = round(real_days / workdays_so_far * 100)
                 dash_pct_str = str(dr[4]).strip().replace("%", "") if len(dr) > 4 else ""
                 try:
@@ -1175,15 +1209,18 @@ def run_checks(d):
             "\n".join(inactive_in_summary))
 
     # ────────────────────────────────────────────────────────────────────────────
-    # 41-45. Реестр уведомлений дашборда (A82:E120) vs лист Уведомления
+    # 41-45. Реестр уведомлений дашборда (B26:G28, нормализован при чтении) vs лист Уведомления
     #        Структура реестра: [время_факт_или_план, имя, тип, время_план, статус]
     #        Ключ сопоставления с листом Уведомления: (имя, тип)
     # ────────────────────────────────────────────────────────────────────────────
     PLANNED_STATUSES = {"запланировано", "ожидает отправки", "ПРОПУЩЕНО", "—"}
-    notif_by_key = {}  # (имя, тип) -> row Уведомления (последняя за сегодня)
+    # (имя, тип) -> ВСЕ строки Уведомления за сегодня. Раньше хранилась только последняя,
+    # и при дубликатах (один тип 2+ раза за день) первые строки реестра ложно
+    # не совпадали по времени/статусу с последней записью листа.
+    notif_rows_by_key = defaultdict(list)
     for r in today_notifs:
         if len(r) >= 4:
-            notif_by_key[(r[2].strip(), r[3].strip())] = r
+            notif_rows_by_key[(r[2].strip(), r[3].strip())].append(r)
 
     real_notif_rows = [r for r in dash_notif if r and str(r[1] if len(r) > 1 else "").strip()
                         and str(r[1]).strip() != "—"]
@@ -1198,23 +1235,23 @@ def run_checks(d):
         if not is_sent_like:
             continue
         sent_like_count += 1
-        match = notif_by_key.get((name, ntype))
-        if not match:
+        matches = notif_rows_by_key.get((name, ntype), [])
+        if not matches:
             phantom_errs.append(f"{name} / {ntype}: статус='{status}', но записи в Уведомления за сегодня нет")
             continue
-        # 41: время факт (col0) ≠ Уведомления!B
-        real_time = str(match[1]).strip() if len(match) > 1 else ""
+        # 41: время факт (col0) должно совпадать хотя бы с ОДНОЙ записью Уведомления!B этого ключа
         dash_time = str(r[0]).strip() if len(r) > 0 else ""
-        if dash_time != real_time:
-            time_errs.append(f"{name} / {ntype}: дашборд={dash_time}, Уведомления!B={real_time}")
-        # 42: статус (col4) ≠ Уведомления!F
-        real_status = str(match[5]).strip() if len(match) > 5 else ""
-        if status != real_status:
-            status_errs.append(f"{name} / {ntype}: дашборд={status}, Уведомления!F={real_status}")
+        real_times = {str(m[1]).strip() for m in matches if len(m) > 1}
+        if dash_time not in real_times:
+            time_errs.append(f"{name} / {ntype}: дашборд={dash_time}, Уведомления!B={sorted(real_times)}")
+        # 42: статус (col4) должен совпадать хотя бы с одной записью Уведомления!F
+        real_statuses = {str(m[5]).strip() for m in matches if len(m) > 5}
+        if status not in real_statuses:
+            status_errs.append(f"{name} / {ntype}: дашборд={status}, Уведомления!F={sorted(real_statuses)}")
         # 43: имя (col1) ≠ Уведомления!C (посимвольно, включая пробелы)
-        real_name = str(match[2]) if len(match) > 2 else ""
-        if r[1] != real_name:
-            name_errs.append(f"'{r[1]}' (дашборд) ≠ '{real_name}' (Уведомления!C)")
+        real_names = {str(m[2]) for m in matches if len(m) > 2}
+        if r[1] not in real_names:
+            name_errs.append(f"'{r[1]}' (дашборд) ∉ {sorted(real_names)} (Уведомления!C)")
 
     if time_errs:
         add("ОШИБКА", 41, "Реестр уведомлений: время факт не совпадает с Уведомления!B", "\n".join(time_errs))
@@ -1225,10 +1262,14 @@ def run_checks(d):
             "\n".join(name_errs))
 
     # 44: число "фактических" строк реестра ≠ числу записей в Уведомления за сегодня
-    if sent_like_count != len(today_notifs):
+    # (макет 02.07.2026 вмещает максимум 3 строки — ARRAY_CONSTRAIN, обрезка сверх ожидаема)
+    DASH_NOTIF_CAP = 3
+    expected_in_dash = min(len(today_notifs), DASH_NOTIF_CAP)
+    if sent_like_count != expected_in_dash:
         add("ПРЕДУПРЕЖДЕНИЕ", 44,
             "Реестр уведомлений: число строк с фактическим статусом ≠ числу записей в Уведомления за сегодня",
-            f"В реестре (факт): {sent_like_count}, в листе Уведомления за сегодня: {len(today_notifs)}")
+            f"В реестре (факт): {sent_like_count}, в листе Уведомления за сегодня: {len(today_notifs)}"
+            f" (лимит блока: {DASH_NOTIF_CAP})")
 
     # 45: выдуманные уведомления (статус "отправлено", но записи в Уведомления нет)
     if phantom_errs:
@@ -1315,7 +1356,7 @@ def run_checks(d):
             if not name:
                 continue
             total_cell = str(r[days_in_month + 1]).strip() if len(r) > days_in_month + 1 else ""
-            has_any_day = any(str(c).strip() for c in r[1:days_in_month + 1])
+            has_any_day = any(_day_cell_worked(c) for c in r[1:days_in_month + 1])
             if not total_cell and has_any_day:
                 broken_sum.append(name)
         if broken_sum:
