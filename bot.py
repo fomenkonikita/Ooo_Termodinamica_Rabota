@@ -375,6 +375,8 @@ def reg_type(call):
 
     sheets.register_employee(str(uid), name, emp_type)
     _state.pop(uid, None)
+    # строка на дашборде сразу, не ждать 5-минутный цикл
+    run_background(sheets.ensure_dashboard_employee_rows)
 
     safe_clear_markup(call.message.chat.id, call.message.message_id)
     bot.send_message(call.message.chat.id,
@@ -796,6 +798,12 @@ def job_update_dashboard():
         sheets.sync_employee_names(dt)
     except Exception as ex:
         log.warning(f"job_update_dashboard: sync_employee_names: {ex}")
+    try:
+        # новый активный сотрудник (через бота или руками в таблице) →
+        # строка в блоках "Сотрудники"/"Месячная сводка" дашборда
+        sheets.ensure_dashboard_employee_rows()
+    except Exception as ex:
+        log.warning(f"job_update_dashboard: ensure_dashboard_employee_rows: {ex}")
 
 
 def job_close_21():

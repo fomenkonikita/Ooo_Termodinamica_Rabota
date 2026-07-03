@@ -977,6 +977,144 @@ def close_orphaned_entries(current_dt, snapshot=None):
     return closed
 
 
+def ensure_dashboard_employee_rows():
+    """Самопочинка блоков "Сотрудники" и "Месячная сводка" на Дашборде: при появлении
+    нового активного сотрудника вставляет строку ВНУТРЬ блока и перегенерирует
+    построчные формулы (имя/объект/пришёл/статус и часы/дни/авто/% явки).
+
+    Дашборд — живые формулы (KNOWLEDGE.md), но СТРУКТУРУ (по строке на сотрудника)
+    формула изменить не может — это единственная структурная правка за кодом.
+    Блоки ищутся по тексту заголовков в колонке B (не по номерам строк — они
+    плывут при каждом расширении). Вставка ВНУТРЬ блока (перед последней строкой)
+    растягивает условное форматирование и merges автоматически; formulas
+    перегенерируются на ВСЕ строки блока (идемпотентно). Ничего не делает,
+    если все активные уже в блоках."""
+    emp_rows = _read("Сотрудники", "A2:E200")
+    active = [str(r[1]).strip() for r in emp_rows
+              if len(r) >= 5 and str(r[1]).strip() and str(r[4]).strip().lower() == "да"]
+    if not active:
+        return None
+
+    col_b = _read("Дашборд", "B1:B100")
+    hdr_emp = hdr_month = hdr_notif = None
+    for i, row in enumerate(col_b):
+        text = str(row[0]).strip() if row else ""
+        if text.startswith("🟢"):
+            hdr_emp = i + 1
+        elif text.startswith("📊"):
+            hdr_month = i + 1
+        elif text.startswith("🔔"):
+            hdr_notif = i + 1
+    if not (hdr_emp and hdr_month and hdr_notif):
+        log.warning("ensure_dashboard_employee_rows: заголовки блоков не найдены, пропуск")
+        return None
+
+    # данные блока: заголовок +2 (после шапки колонок) .. следующий заголовок -2 (1 строка-разделитель)
+    b1_start, b1_end = hdr_emp + 2, hdr_month - 2
+    m_start, m_end = hdr_month + 2, hdr_notif - 2
+    cap1, cap_m = b1_end - b1_start + 1, m_end - m_start + 1
+    n = len(active)
+
+    b1_names = [str(r[0]).strip() if r else "" for r in
+                _read("Дашборд", f"B{b1_start}:B{b1_end}")] if cap1 > 0 else []
+    b1_names += [""] * (cap1 - len(b1_names))
+    if n <= cap1 and b1_names[:n] == active and not any(b1_names[n:]):
+        return None  # всё уже на месте
+
+    dash_id = _get_sheet_id("Дашборд")
+    requests = []
+    # вставки ВНУТРЬ блоков, снизу вверх (сводка ниже блока сотрудников)
+    add_m = max(0, n - cap_m)
+    add_1 = max(0, n - cap1)
+    if add_m:
+        requests.append({"insertDimension": {
+            "range": {"sheetId": dash_id, "dimension": "ROWS",
+                      "startIndex": m_end - 1, "endIndex": m_end - 1 + add_m},
+            "inheritFromBefore": True}})
+    if add_1:
+        requests.append({"insertDimension": {
+            "range": {"sheetId": dash_id, "dimension": "ROWS",
+                      "startIndex": b1_end - 1, "endIndex": b1_end - 1 + add_1},
+            "inheritFromBefore": True}})
+    if requests:
+        _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": requests}))
+
+    # позиции после вставок
+    b1_end += add_1
+    m_start += add_1
+    m_end += add_1 + add_m
+    cap1 += add_1
+    cap_m += add_m
+
+    # merge B:C на каждой строке данных (unmerge + MERGE_ROWS — идемпотентно)
+    merge_reqs = []
+    for start, end in ((b1_start, b1_end), (m_start, m_end)):
+        merge_reqs.append({"unmergeCells": {"range": {
+            "sheetId": dash_id, "startRowIndex": start - 1, "endRowIndex": end,
+            "startColumnIndex": 1, "endColumnIndex": 3}}})
+        merge_reqs.append({"mergeCells": {"range": {
+            "sheetId": dash_id, "startRowIndex": start - 1, "endRowIndex": end,
+            "startColumnIndex": 1, "endColumnIndex": 3}, "mergeType": "MERGE_ROWS"}})
+    _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": merge_reqs}))
+
+    # перегенерация формул на все строки обоих блоков
+    tz_offset = int(os.environ.get("TZ_OFFSET", 5))
+    now_local = datetime.utcnow() + timedelta(hours=tz_offset)
+    year, month = now_local.year, now_local.month
+    days_in_month = calendar.monthrange(year, month)[1]
+    ms = f"{MONTHS_RU[month]} {year}"
+    total_col = _col(days_in_month + 1)
+    last_day = _col(days_in_month)
+    next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
+
+    V = {}
+    for i in range(cap1):
+        r = b1_start + i
+        if i < n:
+            nm = active[i].replace('"', '""')
+            crit = (f"'Журнал'!$A$2:$A$500=TODAY();'Журнал'!$B$2:$B$500=\"{nm}\";"
+                    f"'Журнал'!$F$2:$F$500=\"\"")
+            V[f"B{r}"] = active[i]
+            V[f"D{r}"] = ("=IFERROR(INDEX(FILTER("
+                          "IF('Журнал'!$D$2:$D$500<>\"\";'Журнал'!$D$2:$D$500;'Журнал'!$C$2:$C$500);"
+                          f"{crit});1);\"\")")
+            V[f"F{r}"] = f"=IFERROR(INDEX(FILTER(TEXT('Журнал'!$E$2:$E$500;\"HH:mm\");{crit});1);\"\")"
+            V[f"G{r}"] = (f"=IF(COUNTIFS('Журнал'!$A$2:$A$500;TODAY();'Журнал'!$B$2:$B$500;\"{nm}\";"
+                          f"'Журнал'!$F$2:$F$500;\"\";'Журнал'!$H$2:$H$500;\"⏳ продлено до 23:55\")>0;"
+                          f"\"Продлил смену\";"
+                          f"IF(COUNTIFS('Журнал'!$A$2:$A$500;TODAY();'Журнал'!$B$2:$B$500;\"{nm}\";"
+                          f"'Журнал'!$F$2:$F$500;\"\")>0;\"На месте\";\"Не на месте\"))")
+        else:
+            for c in "BDFG":
+                V[f"{c}{r}"] = ""
+    for i in range(cap_m):
+        r = m_start + i
+        if i < n:
+            nm = active[i].replace('"', '""')
+            V[f"B{r}"] = active[i]
+            V[f"D{r}"] = f"=IFERROR(VLOOKUP(\"{nm}\";'{ms}'!$A$2:${total_col}$50;{days_in_month + 2};0);0)"
+            V[f"E{r}"] = (f"=SUMPRODUCT(('{ms}'!$A$2:$A$50=\"{nm}\")*('{ms}'!$B$2:${last_day}$50>0))"
+                          f"+IF(AND("
+                          f"COUNTIFS('Журнал'!$A$2:$A$500;TODAY();'Журнал'!$B$2:$B$500;\"{nm}\";'Журнал'!$F$2:$F$500;\"\")>0;"
+                          f"SUMIFS('Журнал'!$G$2:$G$500;'Журнал'!$B$2:$B$500;\"{nm}\";'Журнал'!$A$2:$A$500;TODAY())=0"
+                          f");1;0)")
+            V[f"F{r}"] = (f"=COUNTIFS('Журнал'!$B$2:$B$500;\"{nm}\";"
+                          f"'Журнал'!$A$2:$A$500;\">=\"&DATE({year};{month};1);"
+                          f"'Журнал'!$A$2:$A$500;\"<\"&DATE({next_y};{next_m};1);"
+                          f"'Журнал'!$H$2:$H$500;\"⚠️ авто\")")
+            V[f"G{r}"] = f"=IFERROR(E{r}/NETWORKDAYS(DATE({year};{month};1);TODAY());0)"
+        else:
+            for c in "BDEFG":
+                V[f"{c}{r}"] = ""
+
+    data = [{"range": f"Дашборд!{a1}", "values": [[v]]} for a1, v in V.items()]
+    _execute(_values().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={
+        "valueInputOption": "USER_ENTERED", "data": data}))
+    log.info(f"ensure_dashboard_employee_rows: {n} сотрудников, вставлено строк: "
+             f"блок1={add_1}, сводка={add_m}, перезаписано ячеек={len(data)}")
+    return {"employees": n, "added_block1": add_1, "added_month": add_m}
+
+
 _header_styled_months: set = set()    # кэш: не перекрашивать заголовок дважды
 
 

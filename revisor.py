@@ -229,26 +229,42 @@ def load_all():
     # Дашборд (редизайн 02.07.2026: контент с колонки B, имена в merged B:C,
     # поэтому сырые строки имеют пустые колонки-прокладки — нормализуем к старой форме)
     try:
-        # Блок "Сотрудники" (03.07.2026): ВСЕГДА все активные сотрудники, статус
-        # "На месте"/"Продлил смену"/"Не на месте". "На работе" = приход (F) непустой —
-        # в dash_block1 берём только их, иначе критерий 13 ложно считает всех "лишними".
-        raw_b1 = _read("Дашборд", "B14:G18")    # B=имя, D=объект/тип, F=приход, G=статус
+        # Блоки ищутся ПО ЗАГОЛОВКАМ в колонке B, не по номерам строк — строки плывут
+        # при каждом расширении (ensure_dashboard_employee_rows добавляет строки под
+        # новых сотрудников). Данные блока: заголовок+2 .. следующий заголовок-2
+        # (1 строка-разделитель между блоками).
+        grid = _read("Дашборд", "B1:G120")      # индексы в строке: B=0,C=1,D=2,E=3,F=4,G=5
+        hdr = {}
+        for i, row in enumerate(grid):
+            text = str(row[0]).strip() if row else ""
+            for emoji, key in (("🟢", "emp"), ("📊", "month"), ("🔔", "notif"), ("⚠️", "gps")):
+                if text.startswith(emoji):
+                    hdr[key] = i + 1  # 1-индексная строка
+
+        def _block_rows(key, next_key):
+            if key not in hdr or next_key not in hdr:
+                return []
+            return [grid[i] if i < len(grid) else []
+                    for i in range(hdr[key] + 1, hdr[next_key] - 2)]  # 0-индексы: hdr+2-1 .. next-2-1
+
+        # Блок "Сотрудники": ВСЕГДА все активные + статус. "На работе" = приход (F)
+        # непустой — берём только их, иначе критерий 13 ложно считает всех "лишними".
         data["dash_block1"] = [
             [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[4] if len(r) > 4 else ""]
-            for r in raw_b1
+            for r in _block_rows("emp", "month")
             if r and len(r) > 4 and str(r[4]).strip()
         ]  # → [имя, локация, приход] — только кто на смене
-        raw_m = _read("Дашборд", "B21:G25")     # B=имя, D=часы, E=дней, F=авто, G=%
         data["dash_monthly"] = [
             [r[0] if len(r) > 0 else "", r[2] if len(r) > 2 else "", r[3] if len(r) > 3 else "",
              r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
-            for r in raw_m if r
+            for r in _block_rows("month", "notif") if r
         ]  # → [имя, итого_ч, дней, авто, %]
-        raw_n = _read("Дашборд", "B29:G38")     # B=имя, D=время, E=тип, F=план, G=статус (10 строк)
+        notif_rows = _block_rows("notif", "gps")
+        data["dash_notif_capacity"] = len(notif_rows)
         data["dash_notif"] = [
             [r[2] if len(r) > 2 else "", r[0] if len(r) > 0 else "", r[3] if len(r) > 3 else "",
              r[4] if len(r) > 4 else "", r[5] if len(r) > 5 else ""]
-            for r in raw_n if r
+            for r in notif_rows if r
         ]  # → [время, имя, тип, план, статус] (старая форма для критериев 41-45)
     except Exception as ex:
         print(f"  ⚠️  Дашборд: {ex}")
@@ -528,10 +544,9 @@ def run_checks(d):
     extra_in_dash = dash_names - open_names_today
     missing_in_dash = open_names_today - dash_names
 
-    # 03.07.2026: блок "кто на работе" вмещает 5 строк (= полный штат, ARRAY_CONSTRAIN).
-    # Если открытых смен больше (штат вырос без расширения блока) — обрезка ожидаема,
-    # пропуски не считаются ошибкой, пока дашборд показывает полные строки.
-    DASH_BLOCK1_CAP = 5
+    # Блок "Сотрудники" содержит ВСЕХ активных (ensure_dashboard_employee_rows
+    # добавляет строки под новых) — обрезка невозможна, лимит формальный.
+    DASH_BLOCK1_CAP = 999
     expected_truncation = (len(open_names_today) > DASH_BLOCK1_CAP
                            and len(dash_names) >= DASH_BLOCK1_CAP)
 
@@ -1281,8 +1296,9 @@ def run_checks(d):
             "\n".join(name_errs))
 
     # 44: число "фактических" строк реестра ≠ числу записей в Уведомления за сегодня
-    # (с 03.07.2026 блок вмещает 10 строк — ARRAY_CONSTRAIN, обрезка сверх ожидаема)
-    DASH_NOTIF_CAP = 10
+    # (обрезка сверх вместимости блока ожидаема — ARRAY_CONSTRAIN; вместимость
+    # определяется динамически по фактическим границам блока на листе)
+    DASH_NOTIF_CAP = d.get("dash_notif_capacity") or 10
     expected_in_dash = min(len(today_notifs), DASH_NOTIF_CAP)
     if sent_like_count != expected_in_dash:
         add("ПРЕДУПРЕЖДЕНИЕ", 44,
