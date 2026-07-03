@@ -1003,7 +1003,9 @@ def run_checks(d):
             continue
         dash_time = str(r[2]).strip() if len(r) > 2 else ""
         journal_time = str(jr[4]).strip()
-        if dash_time != journal_time:
+        # сравниваем разобранное время, не строки: дашборд показывает "09:09",
+        # Журнал хранит "9:09" — это одно и то же время
+        if _parse_hhmm(dash_time) != _parse_hhmm(journal_time):
             arrival_mismatches.append(f"{name}: дашборд={dash_time or '(пусто)'}, Журнал!E={journal_time or '(пусто)'}")
     if arrival_mismatches:
         add("ОШИБКА", 31, "Дашборд блок1: время прихода не совпадает с Журнал!E",
@@ -1240,9 +1242,11 @@ def run_checks(d):
             phantom_errs.append(f"{name} / {ntype}: статус='{status}', но записи в Уведомления за сегодня нет")
             continue
         # 41: время факт (col0) должно совпадать хотя бы с ОДНОЙ записью Уведомления!B этого ключа
+        # (сравниваем разобранное время: дашборд "07:50" == лист "7:50")
         dash_time = str(r[0]).strip() if len(r) > 0 else ""
         real_times = {str(m[1]).strip() for m in matches if len(m) > 1}
-        if dash_time not in real_times:
+        dash_hm = _parse_hhmm(dash_time)
+        if dash_hm is None or dash_hm not in {_parse_hhmm(t) for t in real_times}:
             time_errs.append(f"{name} / {ntype}: дашборд={dash_time}, Уведомления!B={sorted(real_times)}")
         # 42: статус (col4) должен совпадать хотя бы с одной записью Уведомления!F
         real_statuses = {str(m[5]).strip() for m in matches if len(m) > 5}
