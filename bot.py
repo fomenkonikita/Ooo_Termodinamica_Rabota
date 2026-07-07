@@ -33,7 +33,10 @@ if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is required")
 log.info(f"BOT_TOKEN present: {BOT_TOKEN[:8]}...")
 TZ_OFFSET = int(os.environ.get("TZ_OFFSET", 5))
-ADMIN_IDS = {224397927, 1988448060}  # Никита Фоменко, Александр Лоцманов
+ADMIN_IDS = {224397927, 1988448060, 2023355270}  # Никита Фоменко, Александр Лоцманов, Евгений Гемусов
+
+# Ночная сверка (job_reconcile, 00:10) — узкий список, чтобы не будить всех админов
+NIGHT_REPORT_IDS = {224397927, 2023355270}  # Никита Фоменко, Евгений Гемусов
 
 
 class _BotExceptionHandler(telebot.ExceptionHandler):
@@ -905,10 +908,11 @@ def job_reconcile():
 
     if lines:
         text = "\n".join(lines)
-        try:
-            bot.send_message(224397927, text)  # ночная сверка — только Никите
-        except Exception as ex:
-            log.warning(f"Reconcile alert failed: {ex}")
+        for night_id in NIGHT_REPORT_IDS:
+            try:
+                bot.send_message(night_id, text)
+            except Exception as ex:
+                log.warning(f"Reconcile alert failed ({night_id}): {ex}")
 
 
 WATCHDOG_TIMEOUT_SEC = 1800  # 30 минут без успешного API вызова = зависший
