@@ -124,6 +124,7 @@ def main_kb(emp_type, is_admin=False):
     else:
         kb.add("🚗 Начал смену", "🏁 Закончил смену")
         kb.add("📍 Отправить точку")
+    kb.add("🌴 Сегодня выходной")
     if is_admin:
         kb.add("📊 Статус", "📋 Уведомления")
         kb.add("🔄 Обновить дашборд", "🔧 Сменить тип")
@@ -485,6 +486,48 @@ def btn_left(message):
     bot.send_message(message.chat.id, "📍 Поделитесь геолокацией:", reply_markup=location_kb())
 
 
+@bot.message_handler(func=lambda m: m.text == "🌴 Сегодня выходной")
+def btn_day_off(message):
+    """Сотрудник сам объявляет сегодня выходным/прогулом (03.07.2026):
+    1) больше не дёргаем его напоминаниями сегодня (job_schedule_check)
+    2) админам сразу алерт с временем нажатия
+    3) в месячном листе день красится "Прогул" — живая формула (sheets.py)."""
+    uid = message.from_user.id
+    emp = sheets.get_employee(str(uid))
+    if not emp:
+        return
+    dt = now()
+    if sheets.find_open_entry(emp["name"]):
+        bot.send_message(message.chat.id,
+            "⚠️ У вас открыта смена. Если это ошибка — сначала нажмите «Ушёл».")
+        return
+    if sheets.has_closed_entry_today(emp["name"], dt):
+        bot.send_message(message.chat.id,
+            "⚠️ Вы сегодня уже отмечали приход/уход — поздно объявлять выходной задним числом.")
+        return
+    if sheets.has_declared_absence_today(emp["name"], dt):
+        bot.send_message(message.chat.id, "Уже отмечено на сегодня.")
+        return
+
+    sheets.record_self_declared_absence(str(uid), emp["name"], dt)
+
+    today = dt.strftime("%d.%m.%Y")
+    for suffix in ("bs", "as", "be"):
+        _schedule_notified.add(f"{emp['name']}_{today}_{suffix}")
+
+    bot.send_message(message.chat.id,
+        "🌴 Отмечено — сегодня выходной. Напоминаний по графику сегодня не будет.",
+        reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
+
+    alert = (f"🌴 <b>{emp['name']}</b> отметил(а) сегодня как выходной/прогул "
+             f"в {dt.strftime('%H:%M')}")
+    for admin_id in ADMIN_IDS:
+        try:
+            bot.send_message(admin_id, alert)
+        except Exception as ex:
+            log.warning(f"Day-off admin alert failed ({admin_id}): {ex}")
+
+
 # ── Кнопки водителя ────────────────────────────────────────────────────────────
 
 @bot.message_handler(func=lambda m: m.text == "🚗 Начал смену")
@@ -678,10 +721,13 @@ def job_schedule_check():
     emps      = sheets.get_all_employees_with_schedule()
     late_list = []
     ok_list   = []
+    absent_today = sheets.get_names_declared_absent_today(current)  # "Сегодня выходной"
 
     for emp in emps:
         if not emp["schedule"] or not emp["telegram_id"]:
             continue
+        if emp["name"] in absent_today:
+            continue  # сам объявил выходной — не дёргаем и не считаем "не отметился"
         work_days = emp.get("work_days")
         if work_days and current.weekday() not in work_days:
             continue

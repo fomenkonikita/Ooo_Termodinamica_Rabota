@@ -576,17 +576,23 @@ def _ensure_employee_row(name, dt):
     days_in_month = calendar.monthrange(dt.year, dt.month)[1]
     year, month = dt.year, dt.month
 
+    # "Прогул" (03.07.2026, сам отметил "Сегодня выходной") — приоритет над
+    # часами: даже если что-то есть в Журнале, явная декларация побеждает.
     day_formulas = [
-        f'=IFERROR(SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
-        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}));0)'
+        f'=IFERROR(IF(COUNTIFS(Прогулы!$A$2:$A$500;DATE({year};{month};{day});'
+        f'Прогулы!$B$2:$B$500;$A{{row}})>0;"Прогул";'
+        f'SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
+        f'Журнал!$A$2:$A$500;DATE({year};{month};{day})));0)'
         for day in range(1, days_in_month + 1)
     ]
     helper_formulas = [
-        f'=IF(AND(DATE({year};{month};{day})=TODAY();'
+        f'=IF(COUNTIFS(Прогулы!$A$2:$A$500;DATE({year};{month};{day});'
+        f'Прогулы!$B$2:$B$500;$A{{row}})>0;"прогул";'
+        f'IF(AND(DATE({year};{month};{day})=TODAY();'
         f'COUNTIFS(Журнал!$A$2:$A$500;DATE({year};{month};{day});'
         f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$F$2:$F$500;"")>0);"open";'
         f'IF(COUNTIFS(Журнал!$A$2:$A$500;DATE({year};{month};{day});'
-        f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$H$2:$H$500;"⚠️ авто")>0;"auto";""))'
+        f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$H$2:$H$500;"⚠️ авто")>0;"auto";"")))'
         for day in range(1, days_in_month + 1)
     ]
 
@@ -690,6 +696,49 @@ def reopen_entry(row_num, name, dt):
     при закрытии пересчитается. Часы и цвет дня в месячном листе — живые
     формулы, сами пересчитаются (миграция 02.07.2026)."""
     _write("Журнал", f"F{row_num}:I{row_num}", [["", _hours_formula(row_num), "⏳ продлено до 23:55", ""]])
+
+def _ensure_absence_log_sheet():
+    """Лист "Прогулы" — сырой факт "сотрудник сам отметил сегодня выходной/прогул".
+    Append-only, как GPS лог. Месячный лист формулой красит день в этот статус,
+    KPI/статус дашборда исключают такого сотрудника из "не отметились"/"не на месте"."""
+    meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
+    existing = {s["properties"]["title"] for s in meta["sheets"]}
+    if "Прогулы" in existing:
+        return
+    _execute(_ss().batchUpdate(
+        spreadsheetId=SPREADSHEET_ID,
+        body={"requests": [{"addSheet": {"properties": {"title": "Прогулы"}}}]}
+    ))
+    _write("Прогулы", "A1", [["Дата", "Имя", "TG ID", "Время"]])
+
+
+def record_self_declared_absence(telegram_id, name, dt):
+    """Сотрудник сам нажал "Сегодня выходной" — сырой факт в лист Прогулы.
+    Месячный лист/дашборд подхватят формулой, код тут больше ничего не красит."""
+    _ensure_absence_log_sheet()
+    _append("Прогулы", [dt.strftime("%d.%m.%Y"), name, str(telegram_id), dt.strftime("%H:%M")])
+
+
+def has_declared_absence_today(name, dt):
+    """Уже отмечал(а) сегодня выходной/прогул? (защита от повторного нажатия)."""
+    today_str = dt.strftime("%d.%m.%Y")
+    try:
+        rows = _read("Прогулы", "A2:B500")
+    except Exception:
+        return False
+    return any(len(r) >= 2 and _norm_date(r[0]) == today_str and r[1].strip() == name for r in rows)
+
+
+def get_names_declared_absent_today(dt):
+    """Множество имён, отметивших сегодня выходной/прогул — job_schedule_check
+    больше не должен их дёргать напоминаниями и включать в "не отметились"."""
+    today_str = dt.strftime("%d.%m.%Y")
+    try:
+        rows = _read("Прогулы", "A2:B500")
+    except Exception:
+        return set()
+    return {r[1].strip() for r in rows if len(r) >= 2 and _norm_date(r[0]) == today_str and r[1].strip()}
+
 
 def _ensure_gps_log_sheet():
     meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
@@ -832,6 +881,41 @@ def auto_close_entry(row_num, name, arrival_str, close_dt):
 
 _known_sheets = set()  # кэш существующих листов — не дёргать метаданные на каждый чих
 
+# Единый цвет "прогул/выходной по декларации" — дневная сетка месячного листа
+# И статус в блоке "Сотрудники" дашборда (см. scratchpad add_absence_feature.py)
+ABSENCE_COLOR = {"red": 0.72, "green": 0.11, "blue": 0.11}
+
+
+def _day_color_cf_requests(sheet_id, days_in_month, start_index=0):
+    """3 правила условного форматирования на дневную сетку месячного листа:
+    прогул (тёмно-красный) > open (зелёный) > auto (красный). Формула
+    top-left (B2) ссылается на СВОЮ хелпер-ячейку — Sheets сдвигает ссылку
+    относительно для каждой ячейки диапазона (та же строка, колонка +
+    days_in_month+1). start_index — куда вставлять (0 для чистого листа;
+    >0 если на листе уже есть другие CF-правила, которые нельзя сдвигать)."""
+    first_helper_col = _col(days_in_month + 2)  # 0-индекс колонки хелпера дня 1
+    rng = {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": 100,
+           "startColumnIndex": 1, "endColumnIndex": days_in_month + 1}
+
+    def rule(formula, bg, idx):
+        return {"addConditionalFormatRule": {
+            "rule": {
+                "ranges": [rng],
+                "booleanRule": {
+                    "condition": {"type": "CUSTOM_FORMULA", "values": [{"userEnteredValue": formula}]},
+                    "format": {"backgroundColor": bg},
+                },
+            },
+            "index": idx,
+        }}
+
+    return [
+        rule(f'={first_helper_col}2="прогул"', ABSENCE_COLOR, start_index),
+        rule(f'={first_helper_col}2="open"', {"red": 0.7, "green": 0.9, "blue": 0.7}, start_index + 1),
+        rule(f'={first_helper_col}2="auto"', {"red": 1.0, "green": 0.4, "blue": 0.4}, start_index + 2),
+    ]
+
+
 def _ensure_monthly_sheet(sheet_name, year, month):
     """Создаёт месячный лист с заголовком и серыми выходными если его нет."""
     if sheet_name in _known_sheets:
@@ -911,6 +995,10 @@ def _ensure_monthly_sheet(sheet_name, year, month):
                     "fields": "userEnteredFormat.backgroundColor",
                 }
             })
+    # Раскраска дня по хелпер-ячейке (прогул/open/auto) — раньше добавлялась ТОЛЬКО
+    # одноразовым scratch-скриптом при миграции 02.07.2026, для новых месяцев
+    # (создаются автоматически 1-го числа) не применялась вообще. Теперь в коде.
+    requests += _day_color_cf_requests(sheet_id, days_in_month)
     _execute(_ss().batchUpdate(
         spreadsheetId=SPREADSHEET_ID,
         body={"requests": requests}
