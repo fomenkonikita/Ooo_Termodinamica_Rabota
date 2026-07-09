@@ -645,11 +645,20 @@ def _ensure_employee_row(name, dt):
         log.warning(f"_ensure_employee_row: скрыть хелпер-колонки/формат: {ex}")
 
 
+def _hours_formula(row_num):
+    """Формула для Журнал!G (Отработано): всегда актуальна при ручной правке
+    прихода/ухода админом (просьба пользователя 03.07.2026). MAX(0;...) — защита
+    от ухода раньше прихода при ошибочной ручной правке."""
+    return f'=IF(OR($E{row_num}="";$F{row_num}="");"";MAX(0;$F{row_num}-$E{row_num}))'
+
+
 def record_departure(name, dt, open_entry):
     arrival_str   = open_entry["arrival"]
     row_num       = open_entry["row"]
     departure_str = dt.strftime("%H:%M")
 
+    # статический расчёт — только для ответа пользователю в чате;
+    # в ячейку G пишется ФОРМУЛА (пересчитывается при ручной правке времени)
     try:
         arr = datetime.strptime(arrival_str, "%H:%M")
         dep = datetime.strptime(departure_str, "%H:%M")
@@ -661,7 +670,7 @@ def record_departure(name, dt, open_entry):
     except Exception:
         hours_str, hours_decimal = "0:00", 0.0
 
-    _write("Журнал", f"F{row_num}:I{row_num}", [[departure_str, hours_str, "✅", ""]])
+    _write("Журнал", f"F{row_num}:I{row_num}", [[departure_str, _hours_formula(row_num), "✅", ""]])
     return hours_str, hours_decimal
 
 
@@ -676,10 +685,11 @@ def update_last_activity(name, time_str):
                 return
 
 def reopen_entry(row_num, name, dt):
-    """Снимает авто-закрытие: очищает Уход/Отработано/Статус в Журнале.
-    Часы и цвет дня в месячном листе — живые формулы, сами пересчитаются
-    от того что запись в Журнале снова открыта (миграция 02.07.2026)."""
-    _write("Журнал", f"F{row_num}:I{row_num}", [["", "", "⏳ продлено до 23:55", ""]])
+    """Снимает авто-закрытие: очищает Уход/Статус в Журнале.
+    Отработано (G) — формула: при пустом уходе сама показывает пусто,
+    при закрытии пересчитается. Часы и цвет дня в месячном листе — живые
+    формулы, сами пересчитаются (миграция 02.07.2026)."""
+    _write("Журнал", f"F{row_num}:I{row_num}", [["", _hours_formula(row_num), "⏳ продлено до 23:55", ""]])
 
 def _ensure_gps_log_sheet():
     meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
@@ -808,19 +818,16 @@ def auto_close_entry(row_num, name, arrival_str, close_dt):
         dep = datetime.strptime(departure_str, "%H:%M")
         if dep < arr:
             # Уход раньше прихода = ошибка вызывающей логики (не ночная смена — бот
-            # закрывает всё в 23:55, через полночь смены не живут). Раньше тут было
-            # dep += 1 день → абсурдные "23:56 отработано" (инцидент 02.07.2026).
+            # закрывает всё в 23:55, через полночь смены не живут). Инцидент 02.07.2026.
             log.warning(f"auto_close_entry: уход {departure_str} раньше прихода {arrival_str} "
                         f"({name}, строка {row_num}) — закрываю временем прихода, 0:00 часов")
             departure_str = arrival_str
-            dep = arr
-        total_min     = int((dep - arr).total_seconds() // 60)
-        hours_str     = f"{total_min // 60}:{total_min % 60:02d}"
     except Exception:
-        hours_str = "0:00"
+        pass
 
+    # Отработано (G) — формула, пересчитывается при ручной правке времени
     _write("Журнал", f"F{row_num}:I{row_num}", [
-        [departure_str, hours_str, "⚠️ авто", ""]
+        [departure_str, _hours_formula(row_num), "⚠️ авто", ""]
     ])
 
 _known_sheets = set()  # кэш существующих листов — не дёргать метаданные на каждый чих
