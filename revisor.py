@@ -124,11 +124,14 @@ def _hm_to_min(hm):
 def _day_cell_worked(c):
     """True если ячейка дня месячного листа означает реальное присутствие.
     После миграции на формулы (02.07.2026) КАЖДАЯ ячейка дня содержит SUMIFS
-    и показывает '0:00' даже без смен — непустая строка больше не признак работы."""
+    и показывает '0:00' даже без смен — непустая строка больше не признак работы.
+    "Прогул" (кнопка "Сегодня выходной", 03.07.2026) — тоже не присутствие, но
+    это НЕПУСТАЯ строка — без явного исключения считалась бы рабочим днём
+    (найдено и исправлено 10.07.2026 при разборе "% явки")."""
     s = str(c).strip()
     if not s:
         return False
-    if s in ("0", "0:00", "00:00", "0,00", "0.00"):
+    if s in ("0", "0:00", "00:00", "0,00", "0.00", "Прогул"):
         return False
     return True
 
@@ -339,6 +342,11 @@ def run_checks(d):
     open_entries_today = [e for e in journal_entries
                           if e["date"] == today_str and (len(e["row"]) < 6 or not str(e["row"][5]).strip())]
     open_names_today   = {e["row"][1].strip() for e in open_entries_today if len(e["row"]) > 1}
+    # ЛЮБАЯ запись за сегодня (открытая ИЛИ уже закрытая) — используется в
+    # проверке 38 (% явки), чтобы знать, "начался" ли сегодняшний день для
+    # сотрудника, зеркалит знаменатель дашборда (sheets.py, G-формула).
+    names_with_entry_today = {e["row"][1].strip() for e in journal_entries
+                               if e["date"] == today_str and len(e["row"]) > 1}
 
     # ────────────────────────────────────────────────────────────────────────────
     # 1. Журнал: открытые смены НЕ сегодня (забытые записи)
@@ -1171,6 +1179,10 @@ def run_checks(d):
         # ────────────────────────────────────────────────────────────────────────
         workdays_so_far = sum(1 for dd in range(1, now.day + 1)
                               if date(now.year, now.month, dd).weekday() < 5)
+        # Сегодня не входит в знаменатель, если сотрудник ещё вообще не
+        # отмечался (зеркалит G-формулу дашборда, sheets.py, фикс 10.07.2026:
+        # "я был во все рабочие дни", хотя сегодняшний день ещё не начался).
+        today_is_workday = date(now.year, now.month, now.day).weekday() < 5
         pct_errors = []
         if workdays_so_far:
             for dr in dash_monthly:
@@ -1184,7 +1196,10 @@ def run_checks(d):
                     continue  # нестандартный график — формула не применима (см. Эталон)
                 mrow = my_name_to_row.get(name, [])
                 real_days = _days_on_site(mrow, my_days_in_month, name, open_names_today, now.day)
-                expected_pct = round(real_days / workdays_so_far * 100)
+                denom = workdays_so_far - (1 if today_is_workday and name not in names_with_entry_today else 0)
+                if denom <= 0:
+                    continue
+                expected_pct = round(real_days / denom * 100)
                 dash_pct_str = str(dr[4]).strip().replace("%", "") if len(dr) > 4 else ""
                 try:
                     dash_pct = int(dash_pct_str) if dash_pct_str else 0
