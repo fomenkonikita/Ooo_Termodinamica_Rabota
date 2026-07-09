@@ -790,7 +790,24 @@ def job_update_dashboard():
     except Exception as ex:
         log.warning(f"job_update_dashboard: read_today_snapshot: {ex}")
     try:
-        sheets.close_orphaned_entries(dt, snapshot=snap)
+        orphaned = sheets.close_orphaned_entries(dt, snapshot=snap)
+        # Закрытым СЕГОДНЯ после 21:00 — то же сообщение с кнопкой, что шлёт job_close_21.
+        # Раньше этот путь закрывал молча (инцидент 08.07.2026: Андрющенко не получил
+        # "ещё на работе — нажмите кнопку", потому что cron жил по UTC и job_close_21
+        # в 21:00 Екб не стрелял).
+        for o in orphaned or []:
+            if o.get("is_past_day") or not o.get("telegram_id"):
+                continue
+            try:
+                bot.send_message(int(o["telegram_id"]),
+                    f"⚠️ <b>Авто-закрытие смены</b>\n"
+                    f"🕒 Время закрытия: {o['close_hhmm']} (макс. 8 часов с {o.get('arrival', '?')})\n"
+                    f"📊 Отметка поставлена в таблице.\n\n"
+                    f"Если вы ещё на работе — нажмите кнопку и подтвердите геолокацией.\n"
+                    f"В 23:55 смена закроется в любом случае.",
+                    reply_markup=still_working_kb(o["row"]))
+            except Exception as ex:
+                log.warning(f"orphan-close notify failed ({o.get('name')}): {ex}")
     except Exception as ex:
         log.warning(f"job_update_dashboard: close_orphaned_entries: {ex}")
     try:
@@ -1086,7 +1103,12 @@ if __name__ == "__main__":
 
     threading.Thread(target=run_watchdog, daemon=True).start()
 
-    scheduler = BackgroundScheduler()
+    # КРИТИЧНО: без timezone планировщик живёт по времени сервера (на Render — UTC),
+    # и все cron-задачи стреляют на TZ_OFFSET часов позже екатеринбургского
+    # ("21:00" = 02:00 ночи — инцидент 08.07.2026: авто-закрытие делал молчаливый
+    # close_orphaned_entries, сообщение с кнопкой не отправлялось никому).
+    import pytz
+    scheduler = BackgroundScheduler(timezone=pytz.FixedOffset(TZ_OFFSET * 60))
     scheduler.add_job(job_schedule_check,   "interval", minutes=5)   # каждые 5 мин: до/после начала, до конца
     scheduler.add_job(job_update_dashboard, "interval", minutes=5)   # каждые 5 мин: orphaned-записи + синхронизация имён
     scheduler.add_job(job_close_21,         "cron",     hour=21, minute=0)   # 21:00 авто-закрытие всех + кнопка продления

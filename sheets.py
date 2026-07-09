@@ -977,7 +977,11 @@ def close_orphaned_entries(current_dt, snapshot=None):
                     update_employee_location(tg_id, "")
                 except Exception:
                     pass
-            closed.append({"name": e["name"], "date": e["date"]})
+            closed.append({
+                "name": e["name"], "date": e["date"], "row": e["row"],
+                "telegram_id": tg_id, "arrival": e.get("arrival", ""),
+                "close_hhmm": close_dt.strftime("%H:%M"), "is_past_day": is_past_day,
+            })
             log.info(f"Закрыта {'прошлого дня' if is_past_day else 'сегодня после 21'} запись: {e['name']} от {e['date']}")
         except Exception as ex:
             log.warning(f"close_orphaned_entries: ошибка для {e['name']} ({e.get('date')}): {ex}")
