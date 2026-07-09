@@ -955,6 +955,23 @@ def _ensure_monthly_sheet(sheet_name, year, month):
     meta     = _execute(_ss().get(spreadsheetId=SPREADSHEET_ID))
     sheet_id = next(s["properties"]["sheetId"] for s in meta["sheets"]
                     if s["properties"]["title"] == sheet_name)
+
+    # Расширить сетку до финального размера (дни+Итого+хелперы) ДО создания CF-правил.
+    # Иначе Google Sheets ломает относительную ссылку в CUSTOM_FORMULA: если правило
+    # ссылается на ячейку ЗА пределами текущей ширины листа (по умолчанию 26 колонок,
+    # а хелпер-колонка дня 1 — это индекс days_in_month+2, для 31-дневного месяца это
+    # AH=33 > 26), а сетку потом расширить — ссылка тихо съезжает на другую колонку
+    # (найдено и воспроизведено 10.07.2026 при тестировании авто-создания "Август 2026":
+    # CF ссылался на AH2, после расширения сетки стал ссылаться на BM2).
+    helper_start_col = days_in_month + 2
+    _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
+        "updateSheetProperties": {
+            "properties": {"sheetId": sheet_id,
+                           "gridProperties": {"columnCount": helper_start_col + days_in_month}},
+            "fields": "gridProperties.columnCount",
+        }
+    }]}))
+
     requests = [
         # Закрепить строку 1 и колонку A (Имя)
         {"updateSheetProperties": {
@@ -1035,15 +1052,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
         emp_rows = _read("Сотрудники", "A2:E200")
         active_names = [r[1].strip() for r in emp_rows
                         if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
-        helper_start_col = days_in_month + 2  # индекс сразу после Итого (0-based: A=0)
-        if active_names:
-            _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
-                "updateSheetProperties": {
-                    "properties": {"sheetId": sheet_id,
-                                   "gridProperties": {"columnCount": helper_start_col + days_in_month}},
-                    "fields": "gridProperties.columnCount",
-                }
-            }]}))
+        # Сетка уже расширена выше (до CF-правил) — здесь только используем helper_start_col
         rows_data = [
             _employee_row_values(name, year, month, days_in_month, i + 2)
             for i, name in enumerate(active_names)
