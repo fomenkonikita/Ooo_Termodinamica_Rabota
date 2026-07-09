@@ -1235,7 +1235,7 @@ def ensure_dashboard_employee_rows():
             nm = active[i].replace('"', '""')
             V[f"B{r}"] = active[i]
             V[f"D{r}"] = f"=IFERROR(VLOOKUP(\"{nm}\";'{ms}'!$A$2:${total_col}$50;{days_in_month + 2};0);0)"
-            V[f"E{r}"] = (f"=SUMPRODUCT(('{ms}'!$A$2:$A$50=\"{nm}\")*('{ms}'!$B$2:${last_day}$50>0))"
+            V[f"E{r}"] = (f"=SUMPRODUCT(('{ms}'!$A$2:$A$50=\"{nm}\")*(N('{ms}'!$B$2:${last_day}$50)>0))"
                           f"+IF(AND("
                           f"COUNTIFS('Журнал'!$A$2:$A$500;TODAY();'Журнал'!$B$2:$B$500;\"{nm}\";'Журнал'!$F$2:$F$500;\"\")>0;"
                           f"SUMIFS('Журнал'!$G$2:$G$500;'Журнал'!$B$2:$B$500;\"{nm}\";'Журнал'!$A$2:$A$500;TODAY())=0"
