@@ -564,25 +564,22 @@ def update_monthly_on_arrival(name, dt):
         log.warning(f"update_monthly_on_arrival: {name}: {ex}")
 
 
-def _ensure_employee_row(name, dt):
-    """Создаёт строку сотрудника в месячном листе если её нет — сразу с живыми
-    формулами часов (SUMIFS от Журнала) и хелпер-ячейками для условного
-    форматирования (миграция 02.07.2026), а не пустыми ячейками."""
-    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
-    rows  = _read(sheet, "A2:A100")
-    for row in rows:
-        if row and row[0].strip() == name:
-            return  # уже есть
-    days_in_month = calendar.monthrange(dt.year, dt.month)[1]
-    year, month = dt.year, dt.month
-
+def _month_formula_templates(year, month, days_in_month):
+    """Шаблоны формул дня/хелпера месячного листа с плейсхолдером {row}.
+    Общие для новой строки одного сотрудника (_ensure_employee_row) и для
+    предзаполнения всех сотрудников при создании месяца (_ensure_monthly_sheet) —
+    раньше предзаполнение писало пустые ячейки без формул вообще (см. фикс
+    10.07.2026 в _ensure_monthly_sheet)."""
     # "Прогул" (03.07.2026, сам отметил "Сегодня выходной") — приоритет над
     # часами: даже если что-то есть в Журнале, явная декларация побеждает.
+    # Нет отработанных часов → пусто, не 0 (просьба пользователя 10.07.2026).
     day_formulas = [
         f'=IFERROR(IF(COUNTIFS(Прогулы!$A$2:$A$500;DATE({year};{month};{day});'
         f'Прогулы!$B$2:$B$500;$A{{row}})>0;"Прогул";'
+        f'IF(SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
+        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}))=0;"";'
         f'SUMIFS(Журнал!$G$2:$G$500;Журнал!$B$2:$B$500;$A{{row}};'
-        f'Журнал!$A$2:$A$500;DATE({year};{month};{day})));0)'
+        f'Журнал!$A$2:$A$500;DATE({year};{month};{day}))));"")'
         for day in range(1, days_in_month + 1)
     ]
     helper_formulas = [
@@ -595,15 +592,38 @@ def _ensure_employee_row(name, dt):
         f'Журнал!$B$2:$B$500;$A{{row}};Журнал!$H$2:$H$500;"⚠️ авто")>0;"auto";"")))'
         for day in range(1, days_in_month + 1)
     ]
+    return day_formulas, helper_formulas
+
+
+def _employee_row_values(name, year, month, days_in_month, row_num):
+    """Полная строка сотрудника месячного листа: имя + формулы дней + Итого +
+    формулы хелпера, готовая для values.update/append."""
+    day_formulas, helper_formulas = _month_formula_templates(year, month, days_in_month)
+    last_day_col = _col(days_in_month)
+    return (
+        [name]
+        + [f.format(row=row_num) for f in day_formulas]
+        + [f"=SUM(B{row_num}:{last_day_col}{row_num})"]
+        + [f.format(row=row_num) for f in helper_formulas]
+    )
+
+
+def _ensure_employee_row(name, dt):
+    """Создаёт строку сотрудника в месячном листе если её нет — сразу с живыми
+    формулами часов (SUMIFS от Журнала) и хелпер-ячейками для условного
+    форматирования (миграция 02.07.2026), а не пустыми ячейками."""
+    sheet = f"{MONTHS_RU[dt.month]} {dt.year}"
+    rows  = _read(sheet, "A2:A100")
+    for row in rows:
+        if row and row[0].strip() == name:
+            return  # уже есть
+    days_in_month = calendar.monthrange(dt.year, dt.month)[1]
+    year, month = dt.year, dt.month
 
     # Строка добавилась сразу за последней непустой — индекс уже знаем,
     # повторное чтение не нужно (было узким местом на новых сотрудниках)
     row_num = len(rows) + 2
-    last_day_col = _col(days_in_month)
-    total_col    = _col(days_in_month + 1)
     helper_start_col = days_in_month + 2  # индекс сразу после Итого (0-based: A=0)
-    helper_start_letter = _col(helper_start_col + 1)
-    helper_end_letter   = _col(helper_start_col + days_in_month)
 
     try:
         sheet_id = _get_sheet_id(sheet)
@@ -618,12 +638,7 @@ def _ensure_employee_row(name, dt):
     except Exception as ex:
         log.warning(f"_ensure_employee_row: расширить сетку листа: {ex}")
 
-    row_values = (
-        [name]
-        + [f.format(row=row_num) for f in day_formulas]
-        + [f"=SUM(B{row_num}:{last_day_col}{row_num})"]
-        + [f.format(row=row_num) for f in helper_formulas]
-    )
+    row_values = _employee_row_values(name, year, month, days_in_month, row_num)
     _append(sheet, row_values)
     try:
         if sheet_id is not None:
@@ -1004,20 +1019,48 @@ def _ensure_monthly_sheet(sheet_name, year, month):
         body={"requests": requests}
     ))
 
-    # Предзаполнить всех активных сотрудников чтобы новый лист выглядел как предыдущие
+    # Предзаполнить всех активных сотрудников ФОРМУЛАМИ (не пустыми ячейками!) —
+    # раньше здесь писались просто пустые строки, а _ensure_employee_row не
+    # трогает уже существующую по имени строку → на новом месяце SUMIFS/хелперы
+    # для предзаполненных сотрудников не появлялись вообще, часы не считались
+    # до ручной миграции. Нашёл и починил 10.07.2026 при работе над "0 → пусто".
     try:
         emp_rows = _read("Сотрудники", "A2:E200")
         active_names = [r[1].strip() for r in emp_rows
                         if len(r) >= 5 and r[4].strip().lower() == "да" and r[1].strip()]
-        last_day_col = _col(days_in_month)
-        total_col    = _col(days_in_month + 1)
-        rows_data = []
-        for i, name in enumerate(active_names):
-            row_num = i + 2
-            rows_data.append([name] + [""] * days_in_month +
-                             [f"=SUM(B{row_num}:{last_day_col}{row_num})"])
+        helper_start_col = days_in_month + 2  # индекс сразу после Итого (0-based: A=0)
+        if active_names:
+            _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
+                "updateSheetProperties": {
+                    "properties": {"sheetId": sheet_id,
+                                   "gridProperties": {"columnCount": helper_start_col + days_in_month + 5}},
+                    "fields": "gridProperties.columnCount",
+                }
+            }]}))
+        rows_data = [
+            _employee_row_values(name, year, month, days_in_month, i + 2)
+            for i, name in enumerate(active_names)
+        ]
         if rows_data:
             _write(sheet_name, "A2", rows_data)
+            _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [
+                {
+                    "updateDimensionProperties": {
+                        "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                                  "startIndex": helper_start_col, "endIndex": helper_start_col + days_in_month},
+                        "properties": {"hiddenByUser": True}, "fields": "hiddenByUser",
+                    }
+                },
+                {
+                    "repeatCell": {
+                        "range": {"sheetId": sheet_id,
+                                  "startRowIndex": 1, "endRowIndex": 1 + len(rows_data),
+                                  "startColumnIndex": 1, "endColumnIndex": days_in_month + 2},
+                        "cell": {"userEnteredFormat": {"numberFormat": {"type": "TIME", "pattern": "[h]:mm"}}},
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                },
+            ]}))
     except Exception as ex:
         log.warning(f"_ensure_monthly_sheet: предзаполнение сотрудников: {ex}")
 
@@ -1360,6 +1403,17 @@ def setup_spreadsheet():
                           "startIndex": 8, "endIndex": 10},
                 "properties": {"hiddenByUser": True},
                 "fields": "hiddenByUser",
+            }})
+            # G (Отработано) хранит долю суток (Уход-Приход) — без явного
+            # формата Sheets показывает десятичное число (6,5), а не длительность
+            # (6:30), просьба пользователя 10.07.2026. Idempotent — безопасно
+            # применять на каждом старте, чинит и старые строки тоже.
+            requests.append({"repeatCell": {
+                "range": {"sheetId": journal_id,
+                          "startRowIndex": 1, "endRowIndex": 5000,
+                          "startColumnIndex": 6, "endColumnIndex": 7},
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "TIME", "pattern": "[h]:mm"}}},
+                "fields": "userEnteredFormat.numberFormat",
             }})
 
         if dashboard_id is not None:
