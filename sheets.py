@@ -631,7 +631,7 @@ def _ensure_employee_row(name, dt):
             _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
                 "updateSheetProperties": {
                     "properties": {"sheetId": sheet_id,
-                                   "gridProperties": {"columnCount": helper_start_col + days_in_month + 5}},
+                                   "gridProperties": {"columnCount": helper_start_col + days_in_month}},
                     "fields": "gridProperties.columnCount",
                 }
             }]}))
@@ -985,11 +985,18 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             "properties": {"pixelSize": 160},
             "fields": "pixelSize",
         }},
-        # Колонки дней + Итого: 36px каждая
+        # Колонки дней: 36px каждая
         {"updateDimensionProperties": {
             "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                      "startIndex": 1, "endIndex": days_in_month + 2},
+                      "startIndex": 1, "endIndex": days_in_month + 1},
             "properties": {"pixelSize": 36},
+            "fields": "pixelSize",
+        }},
+        # Итого: вдвое шире дневных колонок (просьба пользователя 10.07.2026)
+        {"updateDimensionProperties": {
+            "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                      "startIndex": days_in_month + 1, "endIndex": days_in_month + 2},
+            "properties": {"pixelSize": 72},
             "fields": "pixelSize",
         }},
     ]
@@ -1033,7 +1040,7 @@ def _ensure_monthly_sheet(sheet_name, year, month):
             _execute(_ss().batchUpdate(spreadsheetId=SPREADSHEET_ID, body={"requests": [{
                 "updateSheetProperties": {
                     "properties": {"sheetId": sheet_id,
-                                   "gridProperties": {"columnCount": helper_start_col + days_in_month + 5}},
+                                   "gridProperties": {"columnCount": helper_start_col + days_in_month}},
                     "fields": "gridProperties.columnCount",
                 }
             }]}))
@@ -1310,11 +1317,18 @@ def _apply_monthly_header_style(sheet_name, year, month):
                     "properties": {"pixelSize": 160},
                     "fields": "pixelSize",
                 }},
-                # Колонки дней + Итого: 36px каждая
+                # Колонки дней: 36px каждая
                 {"updateDimensionProperties": {
                     "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
-                              "startIndex": 1, "endIndex": days_in_month + 2},
+                              "startIndex": 1, "endIndex": days_in_month + 1},
                     "properties": {"pixelSize": 36},
+                    "fields": "pixelSize",
+                }},
+                # Итого: вдвое шире дневных колонок (просьба пользователя 10.07.2026)
+                {"updateDimensionProperties": {
+                    "range": {"sheetId": sheet_id, "dimension": "COLUMNS",
+                              "startIndex": days_in_month + 1, "endIndex": days_in_month + 2},
+                    "properties": {"pixelSize": 72},
                     "fields": "pixelSize",
                 }},
                 # Freeze: первая строка + первая колонка (Июнь создан до этого кода)
