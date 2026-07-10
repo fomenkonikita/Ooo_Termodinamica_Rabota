@@ -841,7 +841,7 @@ def reverse_geocode(lat, lon):
         resp = requests.get(
             "https://nominatim.openstreetmap.org/reverse",
             params={"lat": lat, "lon": lon, "format": "jsonv2",
-                    "accept-language": "ru", "zoom": 16},
+                    "accept-language": "ru", "zoom": 18},
             headers={"User-Agent": "attendance-bot-ooo-termodinamica/1.0"},
             timeout=5,
         )
