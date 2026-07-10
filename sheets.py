@@ -1,4 +1,5 @@
 import os
+import re
 import ssl
 import time
 import calendar
@@ -6,6 +7,7 @@ import logging
 import threading
 from datetime import datetime, timedelta, date
 
+import requests
 import httplib2
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -154,7 +156,7 @@ def _read(sheet, range_):
     return res.get("values", [])
 
 def _append(sheet, values):
-    _execute(_values().append(
+    return _execute(_values().append(
         spreadsheetId=SPREADSHEET_ID,
         range=f"{sheet}!A1",
         valueInputOption="USER_ENTERED",
@@ -816,7 +818,10 @@ def log_gps_and_check(telegram_id, name, location, lat, lon, accuracy, dt):
 
 
 def record_waypoint(name, lat, lon, dt):
-    _append("Точки водителей", [
+    """Возвращает номер строки — нужен для последующей дозаписи адреса
+    (геокодирование идёт отдельным фоновым шагом, чтобы не задерживать
+    ответ водителю, см. reverse_geocode/update_waypoint_address)."""
+    res = _append("Точки водителей", [
         dt.strftime("%d.%m.%Y"),
         name,
         dt.strftime("%H:%M"),
@@ -824,6 +829,37 @@ def record_waypoint(name, lat, lon, dt):
         round(lon, 6),
     ])
     update_last_activity(name, dt.strftime("%H:%M"))
+    updated_range = res["updates"]["updatedRange"]
+    return int(re.search(r"(\d+)", updated_range.split("!")[1]).group(1))
+
+
+def reverse_geocode(lat, lon):
+    """Примерный адрес по координатам через OpenStreetMap Nominatim (бесплатно,
+    без API-ключа). Точность — улица/район, не точный дом. 10.07.2026: просьба
+    пользователя — голые координаты в "Точки водителей" ничего не говорят."""
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/reverse",
+            params={"lat": lat, "lon": lon, "format": "jsonv2",
+                    "accept-language": "ru", "zoom": 16},
+            headers={"User-Agent": "attendance-bot-ooo-termodinamica/1.0"},
+            timeout=5,
+        )
+        addr = resp.json().get("address", {})
+        road = addr.get("road", "")
+        house = addr.get("house_number", "")
+        area = addr.get("suburb") or addr.get("city_district") or addr.get("city") or ""
+        street_part = f"{road} {house}".strip()
+        parts = [p for p in (street_part, area) if p]
+        return ", ".join(parts)
+    except Exception as ex:
+        log.warning(f"reverse_geocode: {ex}")
+        return ""
+
+
+def update_waypoint_address(row_num, address):
+    if address:
+        _write("Точки водителей", f"G{row_num}", [[address]])
 
 def get_open_entries_all(snapshot=None):
     """Все незакрытые записи с Telegram ID сотрудника."""

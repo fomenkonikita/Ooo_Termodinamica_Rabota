@@ -83,6 +83,14 @@ def run_background(func, *args, **kwargs):
     threading.Thread(target=_runner, daemon=True).start()
 
 
+def _geocode_waypoint(row_num, lat, lon):
+    """Дозаписывает примерный адрес в 'Точки водителей' после того, как ответ
+    водителю уже отправлен — Nominatim может отвечать не мгновенно, не хотим
+    задерживать подтверждение (см. run_background)."""
+    address = sheets.reverse_geocode(lat, lon)
+    sheets.update_waypoint_address(row_num, address)
+
+
 def now():
     return datetime.utcnow() + timedelta(hours=TZ_OFFSET)
 
@@ -613,11 +621,12 @@ def handle_location(message):
 
     # Водитель — точка маршрута
     if step == "geo_waypoint":
-        sheets.record_waypoint(emp["name"], lat, lon, dt)
+        row_num = sheets.record_waypoint(emp["name"], lat, lon, dt)
         bot.send_message(message.chat.id,
             f"📍 Точка записана\n🕒 {dt.strftime('%H:%M')}\n<code>{lat:.5f}, {lon:.5f}</code>",
             reply_markup=main_kb(emp["type"], is_admin=(uid in ADMIN_IDS)))
         _state.pop(uid, None)
+        run_background(_geocode_waypoint, row_num, lat, lon)
         return
 
     # Подтверждение «Я ещё на работе»
