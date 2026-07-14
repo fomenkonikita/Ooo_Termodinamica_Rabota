@@ -134,8 +134,7 @@ def main_kb(emp_type, is_admin=False):
         kb.add("📍 Отправить точку")
     kb.add("🌴 Сегодня выходной")
     if is_admin:
-        kb.add("📊 Статус", "📋 Уведомления")
-        kb.add("🔄 Обновить дашборд", "🔧 Сменить тип")
+        kb.add("📊 Статус", "🔧 Сменить тип")
     return kb
 
 
@@ -237,80 +236,43 @@ def _show_status(chat_id):
     entries = sheets.get_open_entries_all()
     dt = now()
 
-    if not entries:
-        bot.send_message(chat_id,
-            f"📊 <b>Статус на {dt.strftime('%d.%m %H:%M')}</b>\n\nСейчас никто не на работе.")
-        return
+    lines = [f"📊 <b>Статус на {dt.strftime('%d.%m %H:%M')}</b>\n"]
 
-    lines = [f"📊 <b>Статус на {dt.strftime('%d.%m %H:%M')}</b>\n\n✅ <b>На работе:</b>"]
-    for e in entries:
-        try:
-            arr_time = datetime.strptime(e["arrival"], "%H:%M")
-            arr_dt   = dt.replace(hour=arr_time.hour, minute=arr_time.minute, second=0, microsecond=0)
-            if arr_dt > dt:
-                arr_dt -= timedelta(days=1)
-            minutes  = max(0, int((dt - arr_dt).total_seconds() // 60))
-            h, m     = divmod(minutes, 60)
-            duration = f"{h}ч {m}мин" if h else f"{m}мин"
-        except Exception:
-            duration = "—"
-        loc_part = f" · {e['location']}" if e.get("location") else ""
-        lines.append(f"  • {e['name']} — с {e['arrival']} ({duration}){loc_part}")
-
-    bot.send_message(chat_id, "\n".join(lines))
-
-
-@bot.message_handler(func=lambda m: m.text == "📋 Уведомления")
-def btn_notifications(message):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    dt = now()
-    plan = sheets.get_today_notification_plan(dt)
-
-    lines = [f"📋 <b>Уведомления за {dt.strftime('%d.%m')}</b>\n"]
-    if not plan:
-        lines.append("На сегодня нет сотрудников с заданным графиком.")
+    if entries:
+        lines.append("✅ <b>На работе:</b>")
+        for e in entries:
+            try:
+                arr_time = datetime.strptime(e["arrival"], "%H:%M")
+                arr_dt   = dt.replace(hour=arr_time.hour, minute=arr_time.minute, second=0, microsecond=0)
+                if arr_dt > dt:
+                    arr_dt -= timedelta(days=1)
+                minutes  = max(0, int((dt - arr_dt).total_seconds() // 60))
+                h, m     = divmod(minutes, 60)
+                duration = f"{h}ч {m}мин" if h else f"{m}мин"
+            except Exception:
+                duration = "—"
+            loc_part = f" · {e['location']}" if e.get("location") else ""
+            lines.append(f"  • {e['name']} — с {e['arrival']} ({duration}){loc_part}")
     else:
-        icons = {"отправлено": "✅", "запланировано": "⏳", "ПРОПУЩЕНО": "❗"}
-        for p in plan:
-            icon = icons.get(p["status"], "❌")
-            time_str = p["actual_time"] or p["planned_at"].strftime("%H:%M")
-            tilde = "" if p["actual_time"] else "~"
-            lines.append(f"{icon} {tilde}{time_str} — {p['name']} ({p['type']}) — {p['status']}")
+        lines.append("Сейчас никто не на работе.")
 
-    # Сводка: кто не отметился сегодня вообще
-    emps = sheets.get_all_employees_with_schedule()
-    today = dt.strftime("%d.%m.%Y")
-    not_marked = []
-    for emp in emps:
-        if not emp["schedule"]:
-            continue
-        work_days = emp.get("work_days")
-        if work_days and dt.weekday() not in work_days:
-            continue
-        if not sheets.find_open_entry(emp["name"]) and not sheets.has_closed_entry_today(emp["name"], dt):
-            not_marked.append(emp["name"])
+    # Не отметились / уже закончили смену / объявили прогул — те же живые
+    # данные, что на дашборде в блоке "Сотрудники" (просьба пользователя 10.07.2026)
+    dash_status = sheets.get_dashboard_employee_status()
+    not_at_work = [d["name"] for d in dash_status if d["status"] == "Не на месте"]
+    absent      = [d["name"] for d in dash_status if d["status"] == "Прогул"]
 
-    if not_marked:
-        lines.append("\n⚠️ <b>Не отмечались сегодня вообще:</b>")
-        for name in not_marked:
+    if not_at_work:
+        lines.append("\n❌ <b>Не отметились / не на работе:</b>")
+        for name in not_at_work:
             lines.append(f"  • {name}")
 
-    bot.send_message(message.chat.id, "\n".join(lines))
+    if absent:
+        lines.append("\n🌴 <b>Прогул сегодня:</b>")
+        for name in absent:
+            lines.append(f"  • {name}")
 
-
-@bot.message_handler(func=lambda m: m.text == "🔄 Обновить дашборд")
-def btn_refresh_dashboard(message):
-    """Дашборд — живые формулы, обновляется сам. Кнопка форсирует только
-    проверку orphaned-записей и синхронизацию имён, не дожидаясь цикла в 5 мин."""
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    msg = bot.send_message(message.chat.id, "🔄 Проверяю незакрытые записи и имена...")
-    try:
-        job_update_dashboard()
-        bot.edit_message_text("✅ Проверено (дашборд и так живой, формулы)", message.chat.id, msg.message_id)
-    except Exception as ex:
-        bot.edit_message_text(f"⚠️ Ошибка: {ex}", message.chat.id, msg.message_id)
+    bot.send_message(chat_id, "\n".join(lines))
 
 
 @bot.message_handler(func=lambda m: m.text == "🔧 Сменить тип")

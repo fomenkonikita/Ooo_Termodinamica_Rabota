@@ -442,76 +442,6 @@ def read_today_snapshot(dt):
 
 
 
-def get_today_notifications(dt):
-    """Реестр уведомлений за сегодня — для админ-кнопки."""
-    try:
-        rows = _read("Уведомления", "A2:G500")
-    except Exception:
-        return []
-    today = dt.strftime("%d.%m.%Y")
-    return [r for r in rows if r and _norm_date(r[0]) == today]
-
-
-def get_today_notification_plan(dt):
-    """Полный план уведомлений на сегодня — и уже отправленные, и ещё предстоящие,
-    и пропущенные (время прошло, а в логе записи нет — сигнал реального сбоя).
-    Возвращает список dict, отсортированный по времени: planned_at, name, type,
-    status (отправлено / запланировано / ПРОПУЩЕНО / ошибка: ...), actual_time."""
-    sent = get_today_notifications(dt)
-    sent_map = {}
-    for n in sent:
-        if len(n) >= 6:
-            sent_map[(n[2].strip(), n[3].strip())] = (n[1], n[5])
-
-    emps = get_all_employees_with_schedule()
-    plan = []
-    for emp in emps:
-        if not emp.get("schedule"):
-            continue
-        work_days = emp.get("work_days")
-        if work_days and dt.weekday() not in work_days:
-            continue
-        name = emp["name"]
-        try:
-            t = datetime.strptime(emp["schedule"], "%H:%M")
-            start_dt = dt.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-            plan.append({"planned_at": start_dt - timedelta(minutes=10), "name": name, "type": "до начала смены"})
-        except Exception:
-            pass
-        end_time_str = emp.get("end_time", "")
-        if end_time_str:
-            try:
-                t = datetime.strptime(end_time_str, "%H:%M")
-                end_dt = dt.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
-                plan.append({"planned_at": end_dt - timedelta(minutes=30), "name": name, "type": "до конца смены"})
-            except Exception:
-                pass
-
-    # Окна догонки должны совпадать с условиями в job_schedule_check (bot.py),
-    # иначе статус на дашборде разойдётся с тем, что бот реально делает.
-    # "до начала смены": planned_at = начало-10мин, шлёт пока minutes_late<=130
-    # "до конца смены": planned_at = конец-30мин, шлёт в [-30; 45] minutes_late
-    catchup_window = {"до начала смены": (None, 130), "до конца смены": (-30, 45)}
-
-    for p in plan:
-        key = (p["name"], p["type"])
-        minutes_late = (dt - p["planned_at"]).total_seconds() / 60
-        lo, hi = catchup_window.get(p["type"], (None, 120))
-        if key in sent_map:
-            p["actual_time"], p["status"] = sent_map[key]
-        elif p["planned_at"] > dt:
-            p["actual_time"], p["status"] = None, "запланировано"
-        elif (lo is None or minutes_late >= lo) and minutes_late <= hi:
-            # В пределах догоняющего окна job_schedule_check — ещё не
-            # «пропущено», просто ждём ближайший запуск джобы (≤5 мин)
-            p["actual_time"], p["status"] = None, "ожидает отправки"
-        else:
-            p["actual_time"], p["status"] = None, "ПРОПУЩЕНО"
-
-    plan.sort(key=lambda p: p["planned_at"])
-    return plan
-
-
 def has_closed_entry_today(name, dt):
     """Есть ли у сотрудника уже ЗАВЕРШЁННАЯ (приход+уход) запись сегодня —
     признак того, что повторный приход может быть случайным/тестовым (см.
@@ -1169,6 +1099,37 @@ def close_orphaned_entries(current_dt, snapshot=None):
         except Exception as ex:
             log.warning(f"close_orphaned_entries: ошибка для {e['name']} ({e.get('date')}): {ex}")
     return closed
+
+
+def get_dashboard_employee_status():
+    """Читает блок "Сотрудники" с Дашборда (имя/объект/пришёл/статус) — те же
+    живые формулы, что видит пользователь на дашборде (На месте/Не на месте/
+    Прогул). Используется командой /статус, чтобы не дублировать логику
+    подсчёта отдельно в Python (просьба пользователя 10.07.2026)."""
+    col_b = _read("Дашборд", "B1:B100")
+    hdr_emp = hdr_month = None
+    for i, row in enumerate(col_b):
+        text = str(row[0]).strip() if row else ""
+        if text.startswith("🟢"):
+            hdr_emp = i + 1
+        elif text.startswith("📊"):
+            hdr_month = i + 1
+    if not (hdr_emp and hdr_month) or hdr_month - 2 < hdr_emp + 2:
+        return []
+    b1_start, b1_end = hdr_emp + 2, hdr_month - 2
+    rows = _read("Дашборд", f"B{b1_start}:G{b1_end}")
+    result = []
+    for r in rows:
+        name = str(r[0]).strip() if len(r) > 0 else ""
+        if not name:
+            continue
+        result.append({
+            "name":    name,
+            "object":  str(r[2]).strip() if len(r) > 2 else "",
+            "arrival": str(r[4]).strip() if len(r) > 4 else "",
+            "status":  str(r[5]).strip() if len(r) > 5 else "",
+        })
+    return result
 
 
 def ensure_dashboard_employee_rows():
