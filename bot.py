@@ -1,4 +1,5 @@
 import os
+import time
 import logging
 import threading
 import tracemalloc
@@ -6,6 +7,8 @@ from math import radians, cos, sin, asin, sqrt
 from datetime import datetime, timedelta
 
 tracemalloc.start()  # диагностика памяти — как можно раньше, до тяжёлых импортов
+
+START_TIME = time.time()  # для аптайма в кнопке "🔧 Тех.статус"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
@@ -139,6 +142,7 @@ def main_kb(emp_type, is_admin=False):
     kb.add("🌴 Сегодня выходной")
     if is_admin:
         kb.add("📊 Статус", "🔧 Сменить тип")
+        kb.add("🔧 Тех.статус")
     return kb
 
 
@@ -277,6 +281,50 @@ def _show_status(chat_id):
             lines.append(f"  • {name}")
 
     bot.send_message(chat_id, "\n".join(lines))
+
+
+@bot.message_handler(func=lambda m: m.text == "🔧 Тех.статус")
+def btn_tech_status(message):
+    """Технические показатели по запросу — те же, что уже уходят push-
+    уведомлениями (память/токен/связь с Google), но здесь и сейчас, без
+    ожидания порога (просьба пользователя 16.07.2026)."""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    rss = _current_rss_mb()
+    mem_line = (f"{rss:.0f} МБ из 512 (порог самоперезапуска {MEM_RESTART_THRESHOLD_MB} МБ)"
+                if rss is not None else "н/д")
+
+    stale_for = time.time() - sheets.last_successful_api_call
+    if stale_for < 60:
+        api_line = f"{int(stale_for)} сек назад ✅"
+    elif stale_for < WATCHDOG_TIMEOUT_SEC:
+        api_line = f"{int(stale_for/60)} мин назад"
+    else:
+        api_line = f"{int(stale_for/60)} мин назад ⚠️ (порог зависания {int(WATCHDOG_TIMEOUT_SEC/60)} мин)"
+
+    reauth_date_str = os.environ.get("REAUTH_DATE", "")
+    if reauth_date_str:
+        try:
+            days_passed = (now().date() - datetime.strptime(reauth_date_str, "%d.%m.%Y").date()).days
+            token_line = f"{days_passed} дн. (обновлён {reauth_date_str}, живёт обычно ~7 дней)"
+        except Exception:
+            token_line = f"дата некорректна ({reauth_date_str})"
+    else:
+        token_line = "REAUTH_DATE не задан"
+
+    uptime_sec = int(time.time() - START_TIME)
+    h, m = divmod(uptime_sec // 60, 60)
+    uptime_line = f"{h}ч {m}мин" if h else f"{m}мин"
+
+    text = (
+        "🔧 <b>Тех.статус</b>\n\n"
+        f"Память: {mem_line}\n"
+        f"Связь с Google Sheets: {api_line}\n"
+        f"Возраст токена: {token_line}\n"
+        f"Аптайм с последнего рестарта: {uptime_line}"
+    )
+    bot.send_message(message.chat.id, text)
 
 
 @bot.message_handler(func=lambda m: m.text == "🔧 Сменить тип")
