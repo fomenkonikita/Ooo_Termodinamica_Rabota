@@ -11,12 +11,25 @@ import requests
 import httplib2
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from google_auth_httplib2 import AuthorizedHttp
 from googleapiclient.discovery import build
 
 log = logging.getLogger(__name__)
 
 _RETRIABLE = (ssl.SSLError, ConnectionError, TimeoutError, OSError)
+
+# Уведомление владельцу в момент, когда OAuth-токен реально протух (invalid_grant) —
+# bot.py регистрирует колбэк при старте (просьба пользователя 16.07.2026, инцидент с
+# истёкшим токеном: без этого узнавали только от сотрудников "бот не работает").
+# Флаг — чтобы не спамить одним и тем же уведомлением на каждый следующий вызов API.
+_token_error_callback = None
+_token_error_notified = False
+
+
+def set_token_error_callback(fn):
+    global _token_error_callback
+    _token_error_callback = fn
 
 # Время последнего УСПЕШНОГО запроса к Google — читает watchdog в bot.py,
 # чтобы понять, что бот завис (см. инцидент 30.06.2026, 45 минут простоя
@@ -40,14 +53,23 @@ def _execute(request, max_retries=3):
     в табель» багов 30.06.2026: единичный сбой сети тихо терял запись,
     а наружный try/except это просто проглатывал). Любой вызов .execute()
     в этом файле должен идти через эту функцию."""
-    global last_successful_api_call
+    global last_successful_api_call, _token_error_notified
     last_exc = None
     for attempt in range(max_retries):
         try:
             with _api_lock:
                 result = request.execute()
             last_successful_api_call = time.time()
+            _token_error_notified = False  # восстановилось — следующий сбой снова уведомит
             return result
+        except RefreshError as ex:
+            if not _token_error_notified and _token_error_callback:
+                _token_error_notified = True
+                try:
+                    _token_error_callback(str(ex))
+                except Exception:
+                    pass
+            raise
         except _RETRIABLE as ex:
             last_exc = ex
             if attempt < max_retries - 1:

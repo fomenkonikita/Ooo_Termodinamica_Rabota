@@ -38,6 +38,10 @@ ADMIN_IDS = {224397927, 1988448060, 2023355270}  # Никита Фоменко, 
 # Ночная сверка (job_reconcile, 00:10) — узкий список, чтобы не будить всех админов
 NIGHT_REPORT_IDS = {224397927, 2023355270}  # Никита Фоменко, Евгений Гемусов
 
+# Личные технические уведомления (токен/память/самоперезапуск) — только владельцу,
+# не всем админам (просьба пользователя 16.07.2026, инцидент с истёкшим токеном)
+OWNER_ID = 224397927  # Никита Фоменко
+
 
 class _BotExceptionHandler(telebot.ExceptionHandler):
     """Глобальный перехватчик: ошибка в одном хендлере не должна ронять весь процесс
@@ -949,6 +953,51 @@ def job_reconcile():
                 log.warning(f"Reconcile alert failed ({night_id}): {ex}")
 
 
+def _alert_owner(text):
+    """Личное техническое уведомление владельцу — токен/память/самоперезапуск
+    (просьба пользователя 16.07.2026: "зайди в гости к Клоду, чтобы он сделал
+    то-то и починил" — формулировка ниже написана в этом стиле специально)."""
+    try:
+        bot.send_message(OWNER_ID, text)
+    except Exception as ex:
+        log.warning(f"Owner alert failed: {ex}")
+
+
+def _on_token_error(err_msg):
+    """Срабатывает СРАЗУ в момент, когда Google-токен реально протух (см.
+    sheets.set_token_error_callback) — не через 30 минут по watchdog и не
+    когда сотрудник напишет "бот не работает"."""
+    _alert_owner(
+        "🚨 <b>Бот не может писать в Google Таблицу — токен протух!</b>\n\n"
+        "👉 Зайди к Клоду (в этот чат) и скажи: «переавторизуй Google-токен "
+        "attendance-бота» — он запустит скрипт, попросит тебя войти в Google "
+        "в открывшемся браузере, обновит токен на Render и перезапустит сервис."
+    )
+
+
+sheets.set_token_error_callback(_on_token_error)
+
+
+def job_check_token_age():
+    """Раз в день: предупредить о токене ЗАРАНЕЕ, до того как он реально
+    протухнет (Testing-статус, живёт ~7 дней) — см. инцидент 16.07.2026."""
+    reauth_date_str = os.environ.get("REAUTH_DATE", "")
+    if not reauth_date_str:
+        return
+    try:
+        reauth_date = datetime.strptime(reauth_date_str, "%d.%m.%Y")
+    except Exception:
+        return
+    days_passed = (now().date() - reauth_date.date()).days
+    if days_passed >= 5:
+        _alert_owner(
+            f"⚠️ <b>Google-токену attendance-бота уже {days_passed} дн.</b> "
+            f"(переавторизован {reauth_date_str}, обычно живёт ~7 дней).\n\n"
+            "👉 Зайди к Клоду и скажи: «переавторизуй Google-токен attendance-бота "
+            "заранее» — 2 минуты, и бот не встанет посреди рабочего дня."
+        )
+
+
 WATCHDOG_TIMEOUT_SEC = 1800  # 30 минут без успешного API вызова = зависший
 
 
@@ -997,6 +1046,7 @@ def run_watchdog():
     секунду, чем непредсказуемый SIGKILL от OOM-killer посреди записи в Sheets."""
     import time as _time
     _time.sleep(120)  # дать время на старт и первый API вызов
+    mem_warning_sent = False  # разовое уведомление за эпизод (просьба 16.07.2026)
     while True:
         _time.sleep(60)
         rss = _current_rss_mb()
@@ -1004,12 +1054,35 @@ def run_watchdog():
             log.info(f"MEM: RSS={rss:.1f}МБ")
             if rss > 350:  # приближаемся к лимиту 512МБ — берём полный снимок
                 log.warning(f"MEM: высокое потребление, снимок tracemalloc:\n{_memory_report()}")
+                if not mem_warning_sent:
+                    mem_warning_sent = True
+                    _alert_owner(
+                        f"📈 <b>Память attendance-бота растёт: {rss:.0f} МБ из 512.</b>\n"
+                        f"Скоро сам перезапустится — это штатно, ничего делать не надо.\n\n"
+                        f"👉 Если это стало происходить заметно чаще, чем раньше — зайди к "
+                        f"Клоду и скажи: «разберись, почему attendance-бот часто "
+                        f"перезапускается по памяти»."
+                    )
+            else:
+                mem_warning_sent = False  # память пришла в норму — следующий рост снова предупредит
             if rss > MEM_RESTART_THRESHOLD_MB:
                 log.error(f"MEM: RSS={rss:.1f}МБ > {MEM_RESTART_THRESHOLD_MB}МБ — плановый самоперезапуск до OOM")
+                _alert_owner(
+                    f"🔄 <b>Attendance-бот сам себя перезапускает</b> (память дошла до "
+                    f"{rss:.0f} МБ). Через несколько секунд снова заработает, обычно ничего "
+                    f"страшного.\n\n👉 Если это повторяется по многу раз за день — зайди к "
+                    f"Клоду и скажи: «найди причину частых перезапусков attendance-бота по памяти»."
+                )
                 os._exit(0)
         stale_for = _time.time() - sheets.last_successful_api_call
         if stale_for > WATCHDOG_TIMEOUT_SEC:
             log.error(f"WATCHDOG: нет успешных запросов к Google {int(stale_for)}с — перезапуск")
+            _alert_owner(
+                f"🚨 <b>Attendance-бот завис</b> — {int(stale_for/60)} мин ни один запрос к "
+                f"Google не прошёл успешно. Перезапускаюсь сам.\n\n👉 Если после перезапуска "
+                f"не отпустит — зайди к Клоду и скажи: «посмотри логи attendance-бота, "
+                f"он завис»."
+            )
             os._exit(1)
 
 
@@ -1133,6 +1206,7 @@ if __name__ == "__main__":
     scheduler.add_job(job_hard_close,       "cron",     hour=23, minute=55)  # 23:55 жёсткое закрытие
     scheduler.add_job(job_reconcile,        "cron",     hour=0,  minute=10)  # 00:10 закрытие незакрытых записей
     scheduler.add_job(job_keepalive,        "interval", minutes=10)          # каждые 10 мин: не даём Render усыплять
+    scheduler.add_job(job_check_token_age,  "cron",     hour=9,  minute=0)   # раз в день: не протух ли скоро токен
     scheduler.start()
     run_background(sheets.setup_spreadsheet)  # однократная настройка таблицы
 
